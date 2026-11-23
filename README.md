@@ -28,7 +28,9 @@ name. Each recording folder holds exactly one of each:
   Inscopix recording: its rising edge is the first frame, its falling edge the
   end of the last frame. Analogue channels are averaged per frame, run edge
   events are summed (encoder ticks per frame). Frames outside the GRIN/camera
-  crop are NaN. A check figure shows full-rate vs downsampled HEKA channels.
+  crop are NaN. Heart rate is computed from ECG R peaks (`hrDS`, bpm). The
+  `plot_cellmap_and_traces` figure gets three panels under the cell traces on
+  the same time axis: running (encoder ticks/s), heart rate and laser.
 - `inscopix/plot_cellmap_and_traces.m`: plots the cell map with colour-coded,
   labelled ROIs (left) next to the stacked traces in matching colours (right).
 - `heka/A_Extract_HekaData_GRIN.m`: loads the HEKA sweeps, concatenates

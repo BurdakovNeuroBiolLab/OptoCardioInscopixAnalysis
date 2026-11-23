@@ -7,6 +7,9 @@
 %   1. inscopix/plot_cellmap_and_traces.m  -> t (s), data, cell map figure
 %   2. heka/A_Extract_HekaData_GRIN.m      -> extractedMatGRINcrop (2.5 ms)
 %   3. Bin the HEKA samples into the cell-trace frames
+%   4. Heart rate from the ECG
+%   5. Running, heart rate and laser added under the traces in the
+%      plot_cellmap_and_traces figure
 %
 % The current folder must contain the files both child scripts look for:
 %   *celltraces.csv, *celltraces-props.csv, one cell map .tif, and the HEKA
@@ -17,6 +20,9 @@
 %                 column 1 is the cell-trace time (s):
 %                 1 time (s)  2 ECG  3 run  4 Laser  5 piezo  6 GRIN  7 Cam
 %   hekaDSTitles  column names
+%   runDS         running, encoder ticks per second, per frame
+%   hrDS          heart rate (bpm) from ECG R peaks, per frame
+%   laserDS       fraction of each frame the laser was on
 %   t, traceNames, data   cell traces as read by plot_cellmap_and_traces
 %
 % Alignment
@@ -33,6 +39,12 @@ clear; clc;
 %% ---------------- Settings ----------------
 durationTol = 0.02;   % warn if GRIN-high time and trace length differ by more
 saveAligned = true;   % save hekaDS etc. to a .mat file in the current folder
+
+% Heart rate from the ECG (defaults for mouse)
+hrRange       = [250 900]; % bpm; beats outside this range are dropped
+hrThreshFrac  = 0.5;       % R-peak threshold as a fraction of the ECG 99.5th percentile
+hrBaselineWin = 0.05;      % s, moving-mean window removed from the ECG
+showHRCheck   = false;     % true = extra figure with the detected R peaks
 
 % How each HEKA column is combined within one trace frame:
 %   'mean' = average (analogue; binary channels give the fraction of time high)
@@ -128,38 +140,107 @@ if nEmpty > 0
              'extractedMatGRINcrop (camera sync shorter than GRIN synch).'], nEmpty, nFrames);
 end
 
-%% ---------------- Check figure ----------------
-% HEKA at full rate (grey) and downsampled (colour) on the trace time axis,
-% with the mean of the plotted cell traces underneath.
-hekaTplot = (hekaT - grinOnS) / stretch + t(1);
-showCols  = 2:nCols;
-nShow     = numel(showCols) + 1;
-figure('Name', 'HEKA aligned to cell traces', 'Position', [100 100 900 900]);
-axAlign = gobjects(nShow, 1);
-for p = 1:numel(showCols)
-    c = showCols(p);
-    axAlign(p) = subplot(nShow, 1, p);
-    if ~strcmp(alignMethod{c}, 'sum')     % sums are on a different scale
-        plot(hekaTplot, extractedMatGRINcrop(:, c), 'Color', [0.75 0.75 0.75]);
-        hold on
-    end
-    plot(t, hekaDS(:, c), 'Color', [0 0.45 0.74], 'LineWidth', 1);
-    hold off
-    ylabel(hekaDSTitles{c});
+%% ---------------- 4. Heart rate from the ECG ----------------
+% R peaks are found in the full-rate ECG of the crop, turned into
+% beat-to-beat heart rate and sampled at the centre of each trace frame.
+hekaFs   = 1000 / hekaDtMs;                                % Hz
+ecg      = extractedMatGRINcrop(:, 2);
+ecgHP    = ecg - movmean(ecg, max(3, round(hrBaselineWin * hekaFs)), 'omitnan');
+if abs(localPrctile(ecgHP, 0.1)) > abs(localPrctile(ecgHP, 99.9))
+    ecgHP = -ecgHP;                                        % R peaks point down
 end
-axAlign(nShow) = subplot(nShow, 1, nShow);
-plot(t, mean(tr, 2, 'omitnan'), 'k');
-ylabel('mean trace');
-xlabel('Time (s)');
-linkaxes(axAlign, 'x');
-xlim(axAlign(1), [t(1) t(end)]);
+hrThresh = hrThreshFrac * localPrctile(ecgHP, 99.5);
+cand = find(ecgHP(2:end-1) > hrThresh & ecgHP(2:end-1) >= ecgHP(1:end-2) & ...
+            ecgHP(2:end-1) > ecgHP(3:end)) + 1;
+% Refractory period: of two peaks closer than 60/maxBpm, keep the larger
+minGap = round(60 / hrRange(2) * hekaFs);
+rIdx = zeros(numel(cand), 1); nR = 0;
+for i = 1:numel(cand)
+    if nR > 0 && cand(i) - rIdx(nR) < minGap
+        if ecgHP(cand(i)) > ecgHP(rIdx(nR)), rIdx(nR) = cand(i); end
+    else
+        nR = nR + 1; rIdx(nR) = cand(i);
+    end
+end
+rIdx  = rIdx(1:nR);
+rT    = hekaT(rIdx);
+beatT = (rT(1:end-1) + rT(2:end)) / 2;                     % HEKA s
+beatHR = 60 ./ diff(rT);                                   % bpm
+okHR  = beatHR >= hrRange(1) & beatHR <= hrRange(2);
+frameEnd = [binStart(2:end); binEnd];
+frameMid = (binStart + frameEnd) / 2;
+if nnz(okHR) >= 2
+    hrDS = interp1(beatT(okHR), beatHR(okHR), frameMid, 'linear', NaN);
+else
+    hrDS = nan(nFrames, 1);
+    warning('Fewer than 2 heart beats detected; check hrThreshFrac / hrRange.');
+end
+hrDS(isnan(hekaDS(:, 2))) = NaN;                           % outside the crop
+fprintf('Heart rate: %d R peaks, median %.0f bpm (%d beats outside hrRange dropped)\n', ...
+        nR, median(beatHR(okHR)), nnz(~okHR));
+
+runDS   = hekaDS(:, 3) ./ ((frameEnd - binStart) / stretch); % encoder ticks per s
+laserDS = hekaDS(:, 4);                                    % fraction of frame on
+
+%% ---------------- 5. Add running, heart rate and laser to the figure ----
+% Same figure as plot_cellmap_and_traces; the traces panel is shortened and
+% three panels on the same time axis are added beneath it.
+trPos  = get(axTr, 'Position');                % [left bottom width height]
+panelH = 0.06; panelGap = 0.015;
+nBelow = 3;
+belowTop = trPos(2) + nBelow * (panelH + panelGap);
+set(axTr, 'Position', [trPos(1) belowTop trPos(3) trPos(2) + trPos(4) - belowTop]);
+xlabel(axTr, '');
+set(axTr, 'XTickLabel', []);
+
+belowY    = {runDS, hrDS, laserDS};
+belowName = {'Run (ticks/s)', 'HR (bpm)', 'Laser'};
+belowCol  = {[0.3 0.8 1], [1 0.35 0.35], [0.4 1 0.4]};
+axBelow   = gobjects(nBelow, 1);
+for p = 1:nBelow
+    y0 = belowTop - p * (panelH + panelGap);
+    axBelow(p) = axes(fig, 'Position', [trPos(1) y0 trPos(3) panelH]);
+    if p == 3
+        stairs(axBelow(p), t, belowY{p}, 'Color', belowCol{p}, 'LineWidth', 1);
+        ylim(axBelow(p), [-0.1 1.1]);
+    else
+        plot(axBelow(p), t, belowY{p}, 'Color', belowCol{p}, 'LineWidth', 1);
+    end
+    set(axBelow(p), 'Color', 'k', 'XColor', 'w', 'YColor', 'w', 'TickDir', 'out', ...
+        'FontSize', 7, 'Box', 'off');
+    ylabel(axBelow(p), belowName{p}, 'Color', belowCol{p}, 'FontSize', 8);
+    if p < nBelow
+        set(axBelow(p), 'XTickLabel', []);
+    end
+end
+xlabel(axBelow(end), 'Time (s)', 'Color', 'w');
+linkaxes([axTr; axBelow], 'x');
+xlim(axTr, [t(1) t(end)]);
+
+%% ---------------- Optional: ECG peak check ----------------
+if showHRCheck
+    figure('Name', 'ECG R-peak detection', 'Position', [100 100 1200 400]);
+    plot(hekaT - grinOnS, ecgHP, 'k'); hold on
+    plot(rT - grinOnS, ecgHP(rIdx), 'r.', 'MarkerSize', 10);
+    yline(hrThresh, 'b--'); hold off
+    xlabel('Time from GRIN start (s)'); ylabel('ECG (baseline removed)');
+end
 
 %% ---------------- Save ----------------
 if saveAligned
     [~, tracesBase] = fileparts(traceFile);
     alignedFile = fullfile(pwd, [tracesBase '_hekaAligned.mat']);
     hekaFile = fileName;
-    save(alignedFile, 'hekaDS', 'hekaDSTitles', 't', 'data', 'traceNames', ...
-         'binStart', 'stretch', 'alignMethod', 'hekaFile', 'traceFile');
+    save(alignedFile, 'hekaDS', 'hekaDSTitles', 'runDS', 'hrDS', 'laserDS', ...
+         't', 'data', 'traceNames', 'binStart', 'stretch', 'alignMethod', ...
+         'rT', 'hekaFile', 'traceFile');
     fprintf('Saved %s\n', alignedFile);
+end
+
+%% ---------------- Helper ----------------
+function v = localPrctile(x, p)
+% Percentile without the Statistics Toolbox
+x = sort(x(~isnan(x(:))));
+if isempty(x), v = 0; return; end
+v = x(max(1, min(numel(x), round(p / 100 * numel(x)))));
 end
