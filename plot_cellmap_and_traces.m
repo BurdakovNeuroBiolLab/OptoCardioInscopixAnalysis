@@ -28,6 +28,11 @@ contourMaxFrac  = 0.6;    % outline pixels further than Size*scale*this from
                           % any centroid are drawn grey (unassigned)
 lineThickness   = 1;      % 0 = 1-pixel outlines, 1 = 3 px, 2 = 5 px ...
 labelFontSize   = 7;
+% Number of cells to show (first N non-rejected cells in props order:
+% C00, C01, ...). [] = all. A parent script can set this before calling.
+if ~exist('nCellsToShow', 'var')
+    nCellsToShow = [];
+end
 
 % File-name patterns (regular expressions, case-insensitive) used to find
 % each file in the current folder. Adjust if your exports are named differently.
@@ -102,6 +107,17 @@ nP = numel(plotIdx);
 if nP == 0
     error('No cells in the props file match the trace column names.');
 end
+if ~isempty(nCellsToShow)
+    if ~isscalar(nCellsToShow) || nCellsToShow < 1 || nCellsToShow ~= round(nCellsToShow)
+        error('nCellsToShow must be a whole number >= 1, or [] for all cells.');
+    end
+    if nCellsToShow < nP
+        keep(plotIdx(nCellsToShow + 1:end)) = false;  % hidden cells: grey on the map
+        plotIdx = plotIdx(1:nCellsToShow);
+        nP = nCellsToShow;
+    end
+end
+fprintf('Showing %d cells\n', nP);
 
 % Distinct colours: golden-ratio hue steps so neighbours differ
 hues = mod((0:nAll-1)' * 0.61803398875, 1);

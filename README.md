@@ -40,7 +40,8 @@ by name. Each recording folder holds exactly one of each:
   crop are NaN. Heart rate is computed from ECG R peaks (`hrDS`, bpm). The
   `plot_cellmap_and_traces` figure gets four panels under the cell traces on
   the same time axis: running (encoder ticks/s), heart rate, laser and pupil
-  diameter.
+  diameter. Set `nCellsToShow` at the top to show only the first N cells
+  ([] = all); the other cells are grey on the map.
 - `plot_cellmap_and_traces.m`: plots the cell map with colour-coded,
   labelled ROIs (left) next to the stacked traces in matching colours (right).
 - `Extract_HekaData_GRIN.m`: loads the HEKA sweeps, concatenates

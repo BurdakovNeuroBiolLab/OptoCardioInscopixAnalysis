@@ -43,6 +43,8 @@
 clear; clc;
 
 %% ---------------- Settings ----------------
+nCellsToShow = [];    % number of cell traces in the final graph: the first N
+                      % non-rejected cells (C00, C01, ...); [] = all cells
 durationTol = 0.02;   % warn if GRIN-high time and trace length differ by more
 saveAligned = true;   % save hekaDS etc. to a .mat file in the current folder
 
