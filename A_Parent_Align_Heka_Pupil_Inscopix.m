@@ -16,7 +16,7 @@
 %      plot_cellmap_and_traces figure
 %
 % The current folder must contain exactly one of each:
-%   *zoompup*.csv (DeepLabCut pupil), *celltraces.csv, *celltraces-props.csv,
+%   *zoompup*.csv (DeepLabCut pupil), *celltrace*.csv, *celltrace*props*.csv,
 %   one cell map .tif, and the HEKA export *L.mat.
 %
 % Output (in the workspace, and saved to <traces name>_hekaAligned.mat)
