@@ -13,7 +13,11 @@
 % to the cell set (e.g. 5x), then gives each white outline the colour of the
 % nearest cell centroid listed in the props file.
 
-clear; clc;
+% When called from a parent script that sets keepWorkspace = true, the
+% workspace is not cleared so the parent's variables survive.
+if ~exist('keepWorkspace', 'var') || ~keepWorkspace
+    clear; clc;
+end
 
 %% ---------------- Settings ----------------
 normalizeTraces = true;   % scale each trace to 0-1 so cells are comparable
