@@ -1,8 +1,8 @@
 % plot_cellmap_and_traces.m
 % Run from the MATLAB current folder containing the Inscopix exports. The
 % three files are found automatically (exactly one of each must be present):
-%   *celltraces.csv        -> cell traces
-%   *celltraces-props.csv  -> cell props
+%   *celltrace.csv         -> cell traces
+%   *celltrace-props.csv   -> cell props
 %   *.tif / *.tiff         -> cell map
 % Left panel:   the cell map with each ROI outline recoloured and labelled.
 % Right panel:  every cell's trace, stacked (C00 at top), in the same colour
@@ -31,8 +31,8 @@ labelFontSize   = 7;
 
 % File-name patterns (regular expressions, case-insensitive) used to find
 % each file in the current folder. Adjust if your exports are named differently.
-propsPattern = 'celltraces-props\.csv$';   % e.g. recording_celltraces-props.csv
-tracePattern = 'celltraces\.csv$';         % e.g. recording_celltraces.csv
+propsPattern = 'celltrace-props\.csv$';    % e.g. m945_celltrace-props.csv
+tracePattern = 'celltrace\.csv$';          % e.g. m945_celltrace.csv
 mapPattern   = '\.tiff?$';                 % the single cell map .tif / .tiff
 
 %% ---------------- Find files in the current folder ----------------

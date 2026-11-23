@@ -21,8 +21,8 @@ Add the repository folder to the MATLAB path, set the current folder to the
 recording folder and run `A_Parent_Align_Heka_Pupil_Inscopix`
 by name. Each recording folder holds exactly one of each:
 
-- `*celltraces.csv`: IDPS cell traces
-- `*celltraces-props.csv`: IDPS cell props
+- `*celltrace.csv`: IDPS cell traces
+- `*celltrace-props.csv`: IDPS cell props
 - `*.tif` / `*.tiff`: cell map with white ROI outlines
 - `*L.mat`: HEKA export
 - `*zoompup*.csv`: DeepLabCut pupil tracking
