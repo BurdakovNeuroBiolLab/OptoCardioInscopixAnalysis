@@ -44,6 +44,8 @@ by name. Each recording folder holds exactly one of each:
   `1:10` or `5:20`; [] = all). The cells outside the range go to a second
   figure, "Unlikely to be cells", with their traces and outlines in colour
   and the selected cells' outlines in black.
+  The main figure is saved as `<traces>_cellmap_traces.tif` (300 dpi) and
+  `.svg` in the current folder (`saveFigure`).
 - `plot_cellmap_and_traces.m`: plots the cell map with colour-coded,
   labelled ROIs (left) next to the stacked traces in matching colours (right).
 - `Extract_HekaData_GRIN.m`: loads the HEKA sweeps, concatenates

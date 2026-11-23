@@ -49,6 +49,9 @@ nCellsToShow = [];    % cells shown as traces in the final graph, by position in
                       % cells" (their traces in colour, these cells black on the map).
 durationTol = 0.02;   % warn if GRIN-high time and trace length differ by more
 saveAligned = true;   % save hekaDS etc. to a .mat file in the current folder
+saveFigure  = true;   % save the main figure (cell map, selected cells' traces,
+                      % HEKA/pupil panels) as .tif and .svg in the current folder
+figureDpi   = 300;    % resolution of the .tif
 
 % Heart rate from the ECG (defaults for mouse)
 hrRange       = [250 900]; % bpm; beats outside this range are dropped
@@ -263,7 +266,7 @@ if showHRCheck
     xlabel('Time from GRIN start (s)'); ylabel('ECG (baseline removed)');
 end
 
-%% ---------------- Save ----------------
+%% ---------------- Save data and figure ----------------
 if saveAligned
     [~, tracesBase] = fileparts(traceFile);
     alignedFile = fullfile(pwd, [tracesBase '_hekaAligned.mat']);
@@ -272,6 +275,16 @@ if saveAligned
          'pupilDS', 't', 'data', 'traceNames', 'binStart', 'stretch', ...
          'alignMethod', 'rT', 'pupilHekaT', 'hekaFile', 'traceFile', 'pupilFile');
     fprintf('Saved %s\n', alignedFile);
+end
+
+if saveFigure
+    [~, tracesBase] = fileparts(traceFile);
+    figBase = fullfile(pwd, [tracesBase '_cellmap_traces']);
+    set(fig, 'InvertHardcopy', 'off', 'PaperPositionMode', 'auto');  % keep black background
+    print(fig, [figBase '.tif'], '-dtiff', sprintf('-r%d', figureDpi));
+    set(fig, 'Renderer', 'painters');      % vector lines and text in the .svg
+    print(fig, [figBase '.svg'], '-dsvg');
+    fprintf('Saved %s.tif and .svg\n', figBase);
 end
 
 %% ---------------- Helper ----------------
