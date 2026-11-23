@@ -43,8 +43,10 @@
 clear; clc;
 
 %% ---------------- Settings ----------------
-nCellsToShow = [];    % number of cell traces in the final graph: the first N
-                      % non-rejected cells (C00, C01, ...); [] = all cells
+nCellsToShow = [];    % cells shown as traces in the final graph, by position in
+                      % the props file (1 = C00), e.g. 1:10 or 5:20; [] = all.
+                      % The other cells go to a second figure, "Unlikely to be
+                      % cells" (their traces in colour, these cells black on the map).
 durationTol = 0.02;   % warn if GRIN-high time and trace length differ by more
 saveAligned = true;   % save hekaDS etc. to a .mat file in the current folder
 

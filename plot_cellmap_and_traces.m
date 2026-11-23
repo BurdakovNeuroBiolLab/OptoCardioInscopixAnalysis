@@ -28,8 +28,10 @@ contourMaxFrac  = 0.6;    % outline pixels further than Size*scale*this from
                           % any centroid are drawn grey (unassigned)
 lineThickness   = 1;      % 0 = 1-pixel outlines, 1 = 3 px, 2 = 5 px ...
 labelFontSize   = 7;
-% Number of cells to show (first N non-rejected cells in props order:
-% C00, C01, ...). [] = all. A parent script can set this before calling.
+% Cells to plot as traces, by position in the props file (1 = C00, 2 = C01,
+% ...), e.g. 1:10 or 5:20. [] = all cells. Rejected cells are skipped.
+% The remaining cells go into a second figure, "Unlikely to be cells".
+% A parent script can set this before calling.
 if ~exist('nCellsToShow', 'var')
     nCellsToShow = [];
 end
@@ -102,22 +104,32 @@ keep = inTraces;
 if skipRejected
     keep = keep & statusAll ~= "rejected";
 end
-plotIdx = find(keep);                 % props order: C00, C01, ...
-nP = numel(plotIdx);
-if nP == 0
+okIdx = find(keep);                   % props order: C00, C01, ...
+if isempty(okIdx)
     error('No cells in the props file match the trace column names.');
 end
-if ~isempty(nCellsToShow)
-    if ~isscalar(nCellsToShow) || nCellsToShow < 1 || nCellsToShow ~= round(nCellsToShow)
-        error('nCellsToShow must be a whole number >= 1, or [] for all cells.');
+if isempty(nCellsToShow)
+    inRange = true(nAll, 1);
+else
+    r = nCellsToShow(:);
+    if ~isnumeric(r) || any(r < 1) || any(r ~= round(r))
+        error('nCellsToShow must be whole numbers >= 1 (e.g. 1:10 or 5:20), or [] for all cells.');
     end
-    if nCellsToShow < nP
-        keep(plotIdx(nCellsToShow + 1:end)) = false;  % hidden cells: grey on the map
-        plotIdx = plotIdx(1:nCellsToShow);
-        nP = nCellsToShow;
+    if any(r > nAll)
+        warning('nCellsToShow goes up to %d but the props file has %d cells; ignoring the rest.', ...
+                max(r), nAll);
+        r = r(r <= nAll);
     end
+    inRange = false(nAll, 1);
+    inRange(r) = true;
 end
-fprintf('Showing %d cells\n', nP);
+plotIdx  = okIdx(inRange(okIdx));     % shown as traces (main figure)
+otherIdx = okIdx(~inRange(okIdx));    % "Unlikely to be cells" figure
+nP = numel(plotIdx);
+if nP == 0
+    error('None of the cells in nCellsToShow are available (all rejected or out of range).');
+end
+fprintf('Showing %d cells; %d in "Unlikely to be cells"\n', nP, numel(otherIdx));
 
 % Distinct colours: golden-ratio hue steps so neighbours differ
 hues = mod((0:nAll-1)' * 0.61803398875, 1);
@@ -175,20 +187,47 @@ end
 cxI = (cxAll + 0.5) * imageScale + 0.5;   % centroids in image coordinates
 cyI = (cyAll + 0.5) * imageScale + 0.5;
 
-%% ---------------- Recolour outlines ----------------
-Rch = bg; Gch = bg; Bch = bg;
+%% ---------------- Assign outline pixels to cells ----------------
+% owner(i) = cell that outline pixel i belongs to (0 = none, drawn grey)
+owner = zeros(numel(wx), 1);
 if ~isempty(wx)
     D2 = (cxI - wx').^2 + (cyI - wy').^2;      % cells x outline pixels
     [dmin2, nearest] = min(D2, [], 1);
     maxR = sizeAll * imageScale * contourMaxFrac;
     assigned = sqrt(dmin2(:)) < maxR(nearest(:));
-    pixCol = 0.6 * ones(numel(wx), 3);          % unassigned: grey
-    for k = 1:nAll
-        sel = assigned & nearest(:) == k;
-        if keep(k)
-            pixCol(sel, :) = repmat(colsAll(k, :), nnz(sel), 1);
-        end                                     % rejected/skipped stay grey
-    end
+    owner(assigned) = nearest(assigned);
+end
+
+P = struct('cxI', cxI, 'cyI', cyI, 'sizeAll', sizeAll, 'imageScale', imageScale, ...
+           'names', cellNameAll, 'cols', colsAll, 'labelFontSize', labelFontSize, ...
+           't', t, 'data', data, 'traceCol', traceCol, ...
+           'normalizeTraces', normalizeTraces, 'spacing', spacing);
+
+%% ---------------- Figure 1: selected cells ----------------
+% Selected cells in colour; all other outlines grey.
+rgb = makeOutlineRGB(bg, wy, wx, owner, plotIdx, [], colsAll, lineThickness);
+[fig, axMap, axTr] = drawMapAndTraces(rgb, plotIdx, P, mf, strrep(mf, '_', '\_'));
+
+%% ---------------- Figure 2: unlikely to be cells ----------------
+% Cells outside nCellsToShow in colour (map and traces); the selected cells
+% are drawn black on the map and not plotted as traces.
+if ~isempty(otherIdx)
+    rgbOther = makeOutlineRGB(bg, wy, wx, owner, otherIdx, plotIdx, colsAll, lineThickness);
+    [figOther, axMapOther, axTrOther] = drawMapAndTraces(rgbOther, otherIdx, P, ...
+        'Unlikely to be cells', ['Unlikely to be cells: ' strrep(mf, '_', '\_')]);
+end
+
+%% ---------------- Helpers ----------------
+function rgb = makeOutlineRGB(bg, wy, wx, owner, colourIdx, blackIdx, cols, lineThickness)
+% Greyscale background with the ROI outlines drawn in: cells in colourIdx in
+% their own colour, cells in blackIdx black, everything else grey.
+[H, W] = size(bg);
+Rch = bg; Gch = bg; Bch = bg;
+if ~isempty(wx)
+    pixCol = 0.6 * ones(numel(wx), 3);
+    isCol = ismember(owner, colourIdx);
+    pixCol(isCol, :) = cols(owner(isCol), :);
+    pixCol(ismember(owner, blackIdx), :) = 0;
     for dy = -lineThickness:lineThickness
         for dx = -lineThickness:lineThickness
             yy = min(max(wy + dy, 1), H);
@@ -201,9 +240,13 @@ if ~isempty(wx)
     end
 end
 rgb = cat(3, Rch, Gch, Bch);
+end
 
-%% ---------------- Plot ----------------
-fig = figure('Color', 'k', 'Name', mf, 'Position', [50 100 1600 800]);
+function [fig, axMap, axTr] = drawMapAndTraces(rgb, idx, P, figName, mapTitle)
+% Cell map (left, labels for the cells in idx) and their stacked traces
+% (right, first cell at the top) in the cells' colours.
+nP  = numel(idx);
+fig = figure('Color', 'k', 'Name', figName, 'Position', [50 100 1600 800]);
 
 % --- Left: map ---
 axMap = axes(fig, 'Position', [0.02 0.06 0.46 0.88]);
@@ -211,25 +254,26 @@ image(axMap, rgb);
 axis(axMap, 'image', 'off');
 hold(axMap, 'on');
 for j = 1:nP
-    k = plotIdx(j);
-    text(axMap, cxI(k) + 0.6 * sizeAll(k) * imageScale * 0.5, ...
-         cyI(k) - 0.6 * sizeAll(k) * imageScale * 0.5, cellNameAll(k), ...
-         'Color', colsAll(k, :), 'FontSize', labelFontSize, 'FontWeight', 'bold');
+    k = idx(j);
+    text(axMap, P.cxI(k) + 0.6 * P.sizeAll(k) * P.imageScale * 0.5, ...
+         P.cyI(k) - 0.6 * P.sizeAll(k) * P.imageScale * 0.5, P.names(k), ...
+         'Color', P.cols(k, :), 'FontSize', P.labelFontSize, 'FontWeight', 'bold');
 end
 hold(axMap, 'off');
-title(axMap, strrep(mf, '_', '\_'), 'Color', 'w');
+title(axMap, mapTitle, 'Color', 'w');
 
 % --- Right: stacked traces ---
-tr = data(:, 1 + traceCol(plotIdx));
-if normalizeTraces
+t  = P.t;
+tr = P.data(:, 1 + P.traceCol(idx));
+if P.normalizeTraces
     mn = min(tr, [], 1, 'omitnan');
     mx = max(tr, [], 1, 'omitnan');
     rg = mx - mn; rg(rg == 0) = 1;
     tr = (tr - mn) ./ rg;
-    gap = spacing;
+    gap = P.spacing;
     labelY = 0.5;
 else
-    gap = spacing * max(max(tr, [], 'omitnan') - min(tr, [], 'omitnan'));
+    gap = P.spacing * max(max(tr, [], 'omitnan') - min(tr, [], 'omitnan'));
     labelY = 0;
 end
 offsets = (nP - 1:-1:0) * gap;                 % first cell at the top
@@ -237,10 +281,10 @@ offsets = (nP - 1:-1:0) * gap;                 % first cell at the top
 axTr = axes(fig, 'Position', [0.55 0.08 0.43 0.86]);
 hold(axTr, 'on');
 for j = 1:nP
-    k = plotIdx(j);
-    plot(axTr, t, tr(:, j) + offsets(j), 'Color', colsAll(k, :), 'LineWidth', 0.7);
-    text(axTr, t(1) - 0.005 * (t(end) - t(1)), offsets(j) + labelY, cellNameAll(k), ...
-         'Color', colsAll(k, :), 'FontSize', labelFontSize, 'FontWeight', 'bold', ...
+    k = idx(j);
+    plot(axTr, t, tr(:, j) + offsets(j), 'Color', P.cols(k, :), 'LineWidth', 0.7);
+    text(axTr, t(1) - 0.005 * (t(end) - t(1)), offsets(j) + labelY, P.names(k), ...
+         'Color', P.cols(k, :), 'FontSize', P.labelFontSize, 'FontWeight', 'bold', ...
          'HorizontalAlignment', 'right', 'VerticalAlignment', 'middle');
 end
 hold(axTr, 'off');
@@ -251,8 +295,8 @@ set(axTr, 'Color', 'k', 'XColor', 'w', 'YColor', 'none', ...
 xlabel(axTr, 'Time (s)', 'Color', 'w');
 
 set(fig, 'InvertHardcopy', 'off');             % keep black background when saving
+end
 
-%% ---------------- Helper ----------------
 function v = localPrctile(x, p)
 % Percentile without the Statistics Toolbox
 x = sort(x(~isnan(x(:))));
