@@ -1,7 +1,9 @@
 % plot_cellmap_and_traces.m
-% Select a folder containing an Inscopix cell props CSV, cell traces CSV and
-% cell map TIFF; the three files are found automatically (exactly one of each
-% must be present).
+% Run from the MATLAB current folder containing the Inscopix exports. The
+% three files are found automatically (exactly one of each must be present):
+%   *celltraces.csv        -> cell traces
+%   *celltraces-props.csv  -> cell props
+%   *.tif / *.tiff         -> cell map
 % Left panel:   the cell map with each ROI outline recoloured and labelled.
 % Right panel:  every cell's trace, stacked (C00 at top), in the same colour
 %               as its ROI on the map.
@@ -24,14 +26,13 @@ lineThickness   = 1;      % 0 = 1-pixel outlines, 1 = 3 px, 2 = 5 px ...
 labelFontSize   = 7;
 
 % File-name patterns (regular expressions, case-insensitive) used to find
-% each file in the selected folder. Adjust if your exports are named differently.
-propsPattern = 'props.*\.csv$';        % e.g. recording_cellset-props.csv
-tracePattern = 'traces?.*\.csv$';      % e.g. recording_cellset-traces.csv
-mapPattern   = '\.tiff?$';             % the single cell map .tif / .tiff
+% each file in the current folder. Adjust if your exports are named differently.
+propsPattern = 'celltraces-props\.csv$';   % e.g. recording_celltraces-props.csv
+tracePattern = 'celltraces\.csv$';         % e.g. recording_celltraces.csv
+mapPattern   = '\.tiff?$';                 % the single cell map .tif / .tiff
 
-%% ---------------- Select folder and find files ----------------
-dataDir = uigetdir(pwd, 'Select the folder containing props CSV, traces CSV and cell map TIFF');
-if isequal(dataDir, 0), disp('Cancelled.'); return; end
+%% ---------------- Find files in the current folder ----------------
+dataDir = pwd;
 
 listing = dir(dataDir);
 listing = listing(~[listing.isdir]);
