@@ -1,28 +1,34 @@
 %% B_AlignHekaToCellTraces
-% Parent script: loads the Inscopix cell traces and the HEKA recording from
-% the MATLAB current folder, then downsamples extractedMatGRINcrop so it has
-% one row per cell-trace frame.
+% Parent script: loads the pupil video data, the Inscopix cell traces and the
+% HEKA recording from the MATLAB current folder, puts the pupil on the HEKA
+% time base, then downsamples extractedMatGRINcrop so it has one row per
+% cell-trace frame.
 %
 % Steps
-%   1. inscopix/plot_cellmap_and_traces.m  -> t (s), data, cell map figure
-%   2. heka/A_Extract_HekaData_GRIN.m      -> extractedMatGRINcrop (2.5 ms)
-%   3. Bin the HEKA samples into the cell-trace frames
-%   4. Heart rate from the ECG
-%   5. Running, heart rate and laser added under the traces in the
+%   1. pupil/pupilCircleFit.m              -> pupil diameter per video frame
+%   2. inscopix/plot_cellmap_and_traces.m  -> t (s), data, cell map figure
+%   3. heka/A_Extract_HekaData_GRIN.m      -> extractedMatGRINcrop (2.5 ms)
+%   4. pupil/alignPupilToHeka.m            -> pupil added as column 8, using
+%                                             the Cam Synch high period
+%   5. Bin the HEKA samples into the cell-trace frames
+%   6. Heart rate from the ECG
+%   7. Running, heart rate, laser and pupil added under the traces in the
 %      plot_cellmap_and_traces figure
 %
-% The current folder must contain the files both child scripts look for:
-%   *celltraces.csv, *celltraces-props.csv, one cell map .tif, and the HEKA
-%   export *L.mat (A_Extract_HekaData_GRIN uses the first *L.mat it finds).
+% The current folder must contain exactly one of each:
+%   *zoompup*.csv (DeepLabCut pupil), *celltraces.csv, *celltraces-props.csv,
+%   one cell map .tif, and the HEKA export *L.mat.
 %
 % Output (in the workspace, and saved to <traces name>_hekaAligned.mat)
-%   hekaDS        (nFrames x 7), same columns as extractedMatGRINcrop except
+%   hekaDS        (nFrames x 8), same columns as extractedMatGRINcrop except
 %                 column 1 is the cell-trace time (s):
 %                 1 time (s)  2 ECG  3 run  4 Laser  5 piezo  6 GRIN  7 Cam
+%                 8 pupil diameter (px)
 %   hekaDSTitles  column names
 %   runDS         running, encoder ticks per second, per frame
 %   hrDS          heart rate (bpm) from ECG R peaks, per frame
 %   laserDS       fraction of each frame the laser was on
+%   pupilDS       pupil diameter (px), per frame
 %   t, traceNames, data   cell traces as read by plot_cellmap_and_traces
 %
 % Alignment
@@ -50,17 +56,32 @@ showHRCheck   = false;     % true = extra figure with the detected R peaks
 %   'mean' = average (analogue; binary channels give the fraction of time high)
 %   'sum'  = total (run edge events -> encoder ticks per frame)
 %   'max'  = 1 if high at any point in the frame
-alignMethod = {'time', 'mean', 'sum', 'mean', 'mean', 'mean', 'mean'};
-%              time    ECG     run    Laser   piezo   GRIN    Cam
+alignMethod = {'time', 'mean', 'sum', 'mean', 'mean', 'mean', 'mean', 'mean'};
+%              time    ECG     run    Laser   piezo   GRIN    Cam     pupil
 
 %% ---------------- Put the child scripts on the path ----------------
 alignRepoDir = fileparts(mfilename('fullpath'));
 if ~isempty(alignRepoDir)
-    addpath(fullfile(alignRepoDir, 'inscopix'), fullfile(alignRepoDir, 'heka'));
+    addpath(fullfile(alignRepoDir, 'inscopix'), fullfile(alignRepoDir, 'heka'), ...
+            fullfile(alignRepoDir, 'pupil'));
 end
-if isempty(which('plot_cellmap_and_traces')) || isempty(which('A_Extract_HekaData_GRIN'))
-    error(['Cannot find plot_cellmap_and_traces.m or A_Extract_HekaData_GRIN.m. ' ...
-           'Add the repository''s inscopix and heka folders to the MATLAB path.']);
+childScripts = {'pupilCircleFit', 'plot_cellmap_and_traces', ...
+                'A_Extract_HekaData_GRIN', 'alignPupilToHeka'};
+for s = 1:numel(childScripts)
+    if isempty(which(childScripts{s}))
+        error(['Cannot find %s.m. Add the repository''s inscopix, heka and pupil ' ...
+               'folders to the MATLAB path.'], childScripts{s});
+    end
+end
+
+pupilFiles = dir('*zoompup*.csv');
+pupilFiles = pupilFiles(~startsWith({pupilFiles.name}, '._') & ...
+                        ~endsWith({pupilFiles.name}, '_circlefit.csv'));
+if isempty(pupilFiles)
+    error('No pupil CSV (*zoompup*.csv) found in:\n  %s', pwd);
+elseif numel(pupilFiles) > 1
+    error('Found %d pupil CSVs (*zoompup*.csv) in:\n  %s\nKeep only one of:\n  %s', ...
+          numel(pupilFiles), pwd, strjoin({pupilFiles.name}, sprintf('\n  ')));
 end
 
 hekaFiles = dir('*L.mat');
@@ -72,18 +93,29 @@ elseif numel(hekaFiles) > 1
           numel(hekaFiles), pwd, strjoin({hekaFiles.name}, sprintf('\n  ')));
 end
 
-%% ---------------- 1. Cell traces + map ----------------
-keepWorkspace = true;          % stops the child script clearing our settings
+keepWorkspace = true;          % stops the child scripts clearing our settings
+
+%% ---------------- 1. Pupil ----------------
+% Runs first: it uses variable names (data, t, ...) that the cell-trace
+% script reuses, so the results are copied to pupil* names straight away.
+pupilCircleFit;                % defines diameter (cleaned, px), fname
+pupilDiameter = diameter;
+pupilFile     = fname;
+
+%% ---------------- 2. Cell traces + map ----------------
 plot_cellmap_and_traces;       % defines t, data, traceNames, tf, ...
 
-%% ---------------- 2. HEKA ----------------
-A_Extract_HekaData_GRIN;       % defines extractedMatGRIN(crop), grinRise/Fall, fileName
+%% ---------------- 3. HEKA ----------------
+A_Extract_HekaData_GRIN;       % defines extractedMatGRIN(crop), grin/camRise/Fall, fileName
 if ~exist('extractedMatGRINcrop', 'var')
     error('A_Extract_HekaData_GRIN did not produce extractedMatGRINcrop (no *L.mat in %s?).', pwd);
 end
 fprintf('HEKA file: %s\n', fileName);
 
-%% ---------------- 3. Align and downsample ----------------
+%% ---------------- 4. Pupil onto the HEKA time base ----------------
+alignPupilToHeka;              % adds column 8 'pupil diameter'
+
+%% ---------------- 5. Align and downsample ----------------
 % HEKA time (s) of the GRIN-high period in the uncropped data, from the
 % rise/fall indices found by A_Extract_HekaData_GRIN
 hekaMs    = extractedMatGRIN(:, 1);
@@ -140,7 +172,7 @@ if nEmpty > 0
              'extractedMatGRINcrop (camera sync shorter than GRIN synch).'], nEmpty, nFrames);
 end
 
-%% ---------------- 4. Heart rate from the ECG ----------------
+%% ---------------- 6. Heart rate from the ECG ----------------
 % R peaks are found in the full-rate ECG of the crop, turned into
 % beat-to-beat heart rate and sampled at the centre of each trace frame.
 hekaFs   = 1000 / hekaDtMs;                                % Hz
@@ -181,26 +213,28 @@ fprintf('Heart rate: %d R peaks, median %.0f bpm (%d beats outside hrRange dropp
 
 runDS   = hekaDS(:, 3) ./ ((frameEnd - binStart) / stretch); % encoder ticks per s
 laserDS = hekaDS(:, 4);                                    % fraction of frame on
+pupilDS = hekaDS(:, 8);                                    % pupil diameter (px)
 
-%% ---------------- 5. Add running, heart rate and laser to the figure ----
+%% ---------------- 7. Add running, heart rate, laser and pupil to the figure
 % Same figure as plot_cellmap_and_traces; the traces panel is shortened and
-% three panels on the same time axis are added beneath it.
+% four panels on the same time axis are added beneath it.
 trPos  = get(axTr, 'Position');                % [left bottom width height]
 panelH = 0.06; panelGap = 0.015;
-nBelow = 3;
+nBelow = 4;
 belowTop = trPos(2) + nBelow * (panelH + panelGap);
 set(axTr, 'Position', [trPos(1) belowTop trPos(3) trPos(2) + trPos(4) - belowTop]);
 xlabel(axTr, '');
 set(axTr, 'XTickLabel', []);
 
-belowY    = {runDS, hrDS, laserDS};
-belowName = {'Run (ticks/s)', 'HR (bpm)', 'Laser'};
-belowCol  = {[0.3 0.8 1], [1 0.35 0.35], [0.4 1 0.4]};
+belowY    = {runDS, hrDS, laserDS, pupilDS};
+belowName = {'Run (ticks/s)', 'HR (bpm)', 'Laser', 'Pupil (px)'};
+belowCol  = {[0.3 0.8 1], [1 0.35 0.35], [0.4 1 0.4], [1 0.8 0.3]};
+laserPanel = 3;
 axBelow   = gobjects(nBelow, 1);
 for p = 1:nBelow
     y0 = belowTop - p * (panelH + panelGap);
     axBelow(p) = axes(fig, 'Position', [trPos(1) y0 trPos(3) panelH]);
-    if p == 3
+    if p == laserPanel
         stairs(axBelow(p), t, belowY{p}, 'Color', belowCol{p}, 'LineWidth', 1);
         ylim(axBelow(p), [-0.1 1.1]);
     else
@@ -232,8 +266,8 @@ if saveAligned
     alignedFile = fullfile(pwd, [tracesBase '_hekaAligned.mat']);
     hekaFile = fileName;
     save(alignedFile, 'hekaDS', 'hekaDSTitles', 'runDS', 'hrDS', 'laserDS', ...
-         't', 'data', 'traceNames', 'binStart', 'stretch', 'alignMethod', ...
-         'rT', 'hekaFile', 'traceFile');
+         'pupilDS', 't', 'data', 'traceNames', 'binStart', 'stretch', ...
+         'alignMethod', 'rT', 'pupilHekaT', 'hekaFile', 'traceFile', 'pupilFile');
     fprintf('Saved %s\n', alignedFile);
 end
 

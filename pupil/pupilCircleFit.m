@@ -14,7 +14,11 @@
 %   4. (optional) Remove remaining single-frame spikes with a moving-median test
 %   5. (optional) Fill short NaN gaps by linear interpolation
 
-clear; clc;
+% When called from a parent script that sets keepWorkspace = true, the
+% workspace is not cleared so the parent's variables survive.
+if ~exist('keepWorkspace', 'var') || ~keepWorkspace
+    clear; clc;
+end
 
 %% Settings
 confThresh   = 0.99;  % points with likelihood < confThresh are set to NaN
