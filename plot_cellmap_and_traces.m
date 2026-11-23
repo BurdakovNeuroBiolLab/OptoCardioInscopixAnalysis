@@ -1,9 +1,8 @@
 % plot_cellmap_and_traces.m
 % Run from the MATLAB current folder containing the Inscopix exports. The
 % three files are found automatically (exactly one of each must be present):
-%   *celltrace*.csv with "props" in the name    -> cell props
-%   *celltrace*.csv without "props" in the name -> cell traces
-%   (celltrace / celltraces, -props / _props all work)
+%   *celltraces.csv        -> cell traces
+%   *celltraces-props.csv  -> cell props
 %   *.tif / *.tiff         -> cell map
 % Left panel:   the cell map with each ROI outline recoloured and labelled.
 % Right panel:  every cell's trace, stacked (C00 at top), in the same colour
@@ -32,11 +31,9 @@ labelFontSize   = 7;
 
 % File-name patterns (regular expressions, case-insensitive) used to find
 % each file in the current folder. Adjust if your exports are named differently.
-% A file counts if it matches the pattern and does NOT match the exclude
-% pattern ('' = exclude nothing).
-propsPattern = 'celltrace.*props.*\.csv$'; propsExclude = '';
-tracePattern = 'celltrace.*\.csv$';        traceExclude = 'props';
-mapPattern   = '\.tiff?$';                 mapExclude   = '';
+propsPattern = 'celltraces-props\.csv$';   % e.g. recording_celltraces-props.csv
+tracePattern = 'celltraces\.csv$';         % e.g. recording_celltraces.csv
+mapPattern   = '\.tiff?$';                 % the single cell map .tif / .tiff
 
 %% ---------------- Find files in the current folder ----------------
 dataDir = pwd;
@@ -46,9 +43,9 @@ listing = listing(~[listing.isdir]);
 names   = {listing.name};
 names   = names(~startsWith(names, '.'));   % skip hidden / macOS '._' files
 
-propsFile = findOneFile(dataDir, names, propsPattern, propsExclude, 'cell PROPS csv');
-traceFile = findOneFile(dataDir, names, tracePattern, traceExclude, 'cell TRACES csv');
-mapFile   = findOneFile(dataDir, names, mapPattern,   mapExclude,   'cell MAP tif');
+propsFile = findOneFile(dataDir, names, propsPattern, 'cell PROPS csv');
+traceFile = findOneFile(dataDir, names, tracePattern, 'cell TRACES csv');
+mapFile   = findOneFile(dataDir, names, mapPattern,   'cell MAP tif');
 
 [~, pn, pe] = fileparts(propsFile); pf = [pn pe];
 [~, tn, te] = fileparts(traceFile); tf = [tn te];
@@ -247,28 +244,16 @@ if isempty(x), v = 0; return; end
 v = x(max(1, min(numel(x), round(p / 100 * numel(x)))));
 end
 
-function f = findOneFile(folder, names, pattern, exclude, label)
-% Return the full path of the single file in NAMES that matches PATTERN and
-% does not match EXCLUDE (both case-insensitive regular expressions).
+function f = findOneFile(folder, names, pattern, label)
+% Return the full path of the single file in NAMES matching PATTERN.
 % Errors if no file or more than one file matches.
-isHit = ~cellfun(@isempty, regexpi(names, pattern, 'once'));
-if ~isempty(exclude)
-    isHit = isHit & cellfun(@isempty, regexpi(names, exclude, 'once'));
-end
-hit = names(isHit);
+hit = names(~cellfun(@isempty, regexpi(names, pattern, 'once')));
 if isempty(hit)
-    csvs = names(~cellfun(@isempty, regexpi(names, '\.(csv|tiff?)$', 'once')));
-    if isempty(csvs), csvs = {'(none)'}; end
-    error(['No %s found in:\n  %s\n(expected a file name matching "%s"%s).\n' ...
-           'CSV/TIFF files in this folder:\n  %s'], label, folder, pattern, ...
-          excludeNote(exclude), strjoin(csvs, sprintf('\n  ')));
+    error('No %s found in:\n  %s\n(expected a file name matching "%s").', ...
+          label, folder, pattern);
 elseif numel(hit) > 1
     error('Found %d candidate %s files in:\n  %s\nKeep only one of:\n  %s', ...
           numel(hit), label, folder, strjoin(hit, sprintf('\n  ')));
 end
 f = fullfile(folder, hit{1});
-end
-
-function s = excludeNote(exclude)
-if isempty(exclude), s = ''; else, s = sprintf(' and not "%s"', exclude); end
 end
