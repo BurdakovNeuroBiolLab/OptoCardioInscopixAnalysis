@@ -10,7 +10,7 @@
 % and in frames removed by pupilCircleFit, e.g. blinks).
 %
 % Needs in the workspace
-%   from A_Extract_HekaData_GRIN: extractedMatGRIN, camRise, camFall,
+%   from Extract_HekaData_GRIN: extractedMatGRIN, camRise, camFall,
 %       cropStart, cropEnd, outCam, outTitles
 %   pupilDiameter   cleaned diameter per video frame (pixels), nPupil x 1
 %
@@ -20,7 +20,7 @@
 %   pupilPeriodMs   video frame period implied by the camera sync (ms)
 
 if any(strcmp(outTitles, 'pupil diameter'))
-    error('extractedMatGRIN already has a pupil column. Re-run A_Extract_HekaData_GRIN first.');
+    error('extractedMatGRIN already has a pupil column. Re-run Extract_HekaData_GRIN first.');
 end
 
 hekaMsP  = extractedMatGRIN(:, 1);

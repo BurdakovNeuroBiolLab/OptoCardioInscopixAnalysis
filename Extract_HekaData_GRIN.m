@@ -1,4 +1,4 @@
-%% A_Extract_HekaData_GRIN
+%% Extract_HekaData_GRIN
 % Loads HEKA-exported sweeps (*L.mat), concatenates them per channel,
 % binarises the digital channels, turns the run channel into edge events,
 % and crops everything to the period where both the GRIN and camera sync

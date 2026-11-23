@@ -1,15 +1,15 @@
-%% B_AlignHekaToCellTraces
+%% A_Parent_Align_Heka_Pupil_Inscopix
 % Parent script: loads the pupil video data, the Inscopix cell traces and the
 % HEKA recording from the MATLAB current folder, puts the pupil on the HEKA
 % time base, then downsamples extractedMatGRINcrop so it has one row per
 % cell-trace frame.
 %
 % Steps
-%   1. pupil/pupilCircleFit.m              -> pupil diameter per video frame
-%   2. inscopix/plot_cellmap_and_traces.m  -> t (s), data, cell map figure
-%   3. heka/A_Extract_HekaData_GRIN.m      -> extractedMatGRINcrop (2.5 ms)
-%   4. pupil/alignPupilToHeka.m            -> pupil added as column 8, using
-%                                             the Cam Synch high period
+%   1. pupilCircleFit.m           -> pupil diameter per video frame
+%   2. plot_cellmap_and_traces.m  -> t (s), data, cell map figure
+%   3. Extract_HekaData_GRIN.m    -> extractedMatGRINcrop (2.5 ms)
+%   4. alignPupilToHeka.m         -> pupil added as column 8, using
+%                                    the Cam Synch high period
 %   5. Bin the HEKA samples into the cell-trace frames
 %   6. Heart rate from the ECG
 %   7. Running, heart rate, laser and pupil added under the traces in the
@@ -62,15 +62,14 @@ alignMethod = {'time', 'mean', 'sum', 'mean', 'mean', 'mean', 'mean', 'mean'};
 %% ---------------- Put the child scripts on the path ----------------
 alignRepoDir = fileparts(mfilename('fullpath'));
 if ~isempty(alignRepoDir)
-    addpath(fullfile(alignRepoDir, 'inscopix'), fullfile(alignRepoDir, 'heka'), ...
-            fullfile(alignRepoDir, 'pupil'));
+    addpath(alignRepoDir);
 end
 childScripts = {'pupilCircleFit', 'plot_cellmap_and_traces', ...
-                'A_Extract_HekaData_GRIN', 'alignPupilToHeka'};
+                'Extract_HekaData_GRIN', 'alignPupilToHeka'};
 for s = 1:numel(childScripts)
     if isempty(which(childScripts{s}))
-        error(['Cannot find %s.m. Add the repository''s inscopix, heka and pupil ' ...
-               'folders to the MATLAB path.'], childScripts{s});
+        error(['Cannot find %s.m. Keep all the repository''s .m files in one ' ...
+               'folder on the MATLAB path.'], childScripts{s});
     end
 end
 
@@ -106,9 +105,9 @@ pupilFile     = fname;
 plot_cellmap_and_traces;       % defines t, data, traceNames, tf, ...
 
 %% ---------------- 3. HEKA ----------------
-A_Extract_HekaData_GRIN;       % defines extractedMatGRIN(crop), grin/camRise/Fall, fileName
+Extract_HekaData_GRIN;       % defines extractedMatGRIN(crop), grin/camRise/Fall, fileName
 if ~exist('extractedMatGRINcrop', 'var')
-    error('A_Extract_HekaData_GRIN did not produce extractedMatGRINcrop (no *L.mat in %s?).', pwd);
+    error('Extract_HekaData_GRIN did not produce extractedMatGRINcrop (no *L.mat in %s?).', pwd);
 end
 fprintf('HEKA file: %s\n', fileName);
 
@@ -117,7 +116,7 @@ alignPupilToHeka;              % adds column 8 'pupil diameter'
 
 %% ---------------- 5. Align and downsample ----------------
 % HEKA time (s) of the GRIN-high period in the uncropped data, from the
-% rise/fall indices found by A_Extract_HekaData_GRIN
+% rise/fall indices found by Extract_HekaData_GRIN
 hekaMs    = extractedMatGRIN(:, 1);
 hekaDtMs  = median(diff(hekaMs));
 grinOnS   = hekaMs(grinRise) / 1000;
