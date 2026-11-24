@@ -23,9 +23,11 @@ by name. Each recording folder holds exactly one of each:
 
 - `*celltrace.csv`: IDPS cell traces
 - `*celltrace-props.csv`: IDPS cell props
-- `*.tif` / `*.tiff`: cell map with white ROI outlines
+- `*cellmap.tif` / `*cellmap.tiff`: cell map with white ROI outlines
 - `*L.mat`: HEKA export
 - `*zoompup*.csv`: DeepLabCut pupil tracking
+
+Files starting with `._` (macOS resource files) are ignored by every script.
 
 ## Scripts
 

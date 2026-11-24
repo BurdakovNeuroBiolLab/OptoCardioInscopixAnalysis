@@ -17,7 +17,7 @@
 %
 % The current folder must contain exactly one of each:
 %   *zoompup*.csv (DeepLabCut pupil), *celltrace.csv, *celltrace-props.csv,
-%   one cell map .tif, and the HEKA export *L.mat.
+%   *cellmap.tif, and the HEKA export *L.mat. Files starting with ._ are ignored.
 %
 % Output (in the workspace, and saved to <traces name>_hekaAligned.mat)
 %   hekaDS        (nFrames x 8), same columns as extractedMatGRINcrop except

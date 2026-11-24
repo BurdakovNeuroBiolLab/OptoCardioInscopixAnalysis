@@ -3,7 +3,7 @@
 % three files are found automatically (exactly one of each must be present):
 %   *celltrace.csv         -> cell traces
 %   *celltrace-props.csv   -> cell props
-%   *.tif / *.tiff         -> cell map
+%   *cellmap.tif / .tiff   -> cell map
 % Left panel:   the cell map with each ROI outline recoloured and labelled.
 % Right panel:  every cell's trace, stacked (C00 at top), in the same colour
 %               as its ROI on the map.
@@ -40,7 +40,7 @@ end
 % each file in the current folder. Adjust if your exports are named differently.
 propsPattern = 'celltrace-props\.csv$';    % e.g. m945_celltrace-props.csv
 tracePattern = 'celltrace\.csv$';          % e.g. m945_celltrace.csv
-mapPattern   = '\.tiff?$';                 % the single cell map .tif / .tiff
+mapPattern   = 'cellmap\.tiff?$';          % e.g. m945_cellmap.tif (not *_cellmap_traces.tif)
 
 %% ---------------- Find files in the current folder ----------------
 dataDir = pwd;
@@ -48,7 +48,7 @@ dataDir = pwd;
 listing = dir(dataDir);
 listing = listing(~[listing.isdir]);
 names   = {listing.name};
-names   = names(~startsWith(names, '.'));   % skip hidden / macOS '._' files
+names   = names(~startsWith(names, '.'));   % skip hidden files, incl. macOS '._' files
 
 propsFile = findOneFile(dataDir, names, propsPattern, 'cell PROPS csv');
 traceFile = findOneFile(dataDir, names, tracePattern, 'cell TRACES csv');
