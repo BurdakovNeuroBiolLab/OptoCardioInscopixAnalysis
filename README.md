@@ -14,6 +14,10 @@ it calls the others.
 | `Extract_HekaData_GRIN.m` | HEKA data extraction |
 | `pupilCircleFit.m` | DeepLabCut pupil circle fit |
 | `alignPupilToHeka.m` | Pupil diameter onto the HEKA time base |
+| `continuous_hrv_mouse.m` | Windowed HR / HRV from beat times (Nik and Mattia, with fixes) |
+| `dfa_alpha1_local.m` | DFA alpha1 of an IBI series |
+| `flag_bad_ibi.m` | Marks IBIs from missed / extra beats |
+| `Nik_and_Mattia_HeartRate_code_vs_Claude.md` | Comparison of the two heart-rate methods |
 
 ## Usage
 
@@ -39,10 +43,13 @@ Files starting with `._` (macOS resource files) are ignored by every script.
   Inscopix recording: its rising edge is the first frame, its falling edge the
   end of the last frame. Analogue channels are averaged per frame, run edge
   events are summed (encoder ticks per frame). Frames outside the GRIN/camera
-  crop are NaN. Heart rate is computed from ECG R peaks (`hrDS`, bpm). The
-  `plot_cellmap_and_traces` figure gets four panels under the cell traces on
-  the same time axis: running (encoder ticks/s), heart rate, laser and pupil
-  diameter. Set `nCellsToShow` at the top to a range of cells (1 = C00, e.g.
+  crop are NaN. Heart rate is computed from ECG R peaks refined to
+  sub-sample timing (`hrDS`, bpm), after removing missed / extra beats; HRV
+  (HR, RMSSD, CVSD, CV_IBI, residual) comes from `continuous_hrv_mouse` in
+  10 s windows (`hrvDS`), and DFA alpha1 over the whole crop (`alpha1Whole`).
+  The `plot_cellmap_and_traces` figure gets five panels under the cell
+  traces on the same time axis: running (encoder ticks/s), heart rate,
+  RMSSD, laser and pupil diameter. Set `nCellsToShow` at the top to a range of cells (1 = C00, e.g.
   `1:10` or `5:20`; [] = all). The cells outside the range go to a second
   figure, "Unlikely to be cells", with their traces and outlines in colour
   and the selected cells' outlines in black.
