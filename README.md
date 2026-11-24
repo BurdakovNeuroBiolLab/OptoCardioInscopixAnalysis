@@ -1,11 +1,13 @@
 # OptoCardioInscopixAnalysis
 
-MATLAB analysis code for opto / cardio / Inscopix experiments.
+MATLAB analysis code for opto / cardio / Inscopix experiments, plus Python
+batch processing of raw Inscopix `.isxd` movies.
 
 ## Files
 
 All scripts are in the repository root. Run `A_Parent_Align_Heka_Pupil_Inscopix`;
-it calls the others.
+it calls the others. The Python files (`isx_*.py`, `isxd_numpy.py`) are
+described under [Inscopix batch processing (Python)](#inscopix-batch-processing-python).
 
 | File | Contents |
 |---|---|
@@ -18,6 +20,9 @@ it calls the others.
 | `dfa_alpha1_local.m` | DFA alpha1 of an IBI series |
 | `flag_bad_ibi.m` | Marks IBIs from missed / extra beats |
 | `Nik_and_Mattia_HeartRate_code_vs_Claude.md` | Comparison of the two heart-rate methods |
+| `isx_batch_gui.py` | Python GUI: select `.isxd` files, set parameters, batch process |
+| `isx_batch_process.py` | Python batch pipeline (command line), IDPS 1.9.x steps |
+| `isxd_numpy.py` | Reads/writes `.isxd` and re-implements the IDPS steps in NumPy/SciPy |
 
 ## Usage
 
@@ -65,3 +70,62 @@ Files starting with `._` (macOS resource files) are ignored by every script.
 - `alignPupilToHeka.m`: the Cam Synch period (first rise to last fall)
   covers the whole pupil CSV; video frames are spread evenly over it and each
   HEKA sample takes the diameter of the frame it falls in.
+
+## Inscopix batch processing (Python)
+
+Processes raw `.isxd` movies with the steps of Inscopix Data Processing (IDPS)
+1.9.x, for any number of files:
+
+preprocess → spatial filter → motion correction (mean-image reference) → crop
+to the valid area → DF/F → PCA-ICA or CNMFe → event detection → auto
+accept/reject → export (traces CSV, props CSV, cell TIFFs, events CSV).
+
+Defaults are the IDPS defaults, except spatial downsampling (2).
+
+**GUI**
+
+```
+python isx_batch_gui.py
+```
+
+Add files or folders, choose an output folder, set any parameter (every IDPS
+1.9.x parameter has a field with an explanation) and press Run. Settings can be
+saved/loaded as JSON; each run also saves its parameters as
+`params_<date-time>.json` in the output folder. Cancel stops at once; the
+interrupted step is redone on the next run, and finished steps are skipped
+unless "Overwrite" is on.
+
+**Command line**
+
+```
+python isx_batch_process.py data/*.isxd -o processed
+python isx_batch_process.py seg1.isxd seg2.isxd -o out --mode series
+python isx_batch_process.py data/ -o out --config params.json
+python isx_batch_process.py --help
+```
+
+**Several files**
+
+- `independent` (default): each file is its own session, in its own output folder.
+- `series`: the files are segments of one recording (same field of view); they
+  share the motion-correction reference, F0, the cell set and accept/reject
+  decisions, and export to one CSV with real time gaps.
+
+**Backends**
+
+- `isx`: the Python API shipped with IDPS 1.9.x. Results identical to IDPS.
+  Run the GUI from that environment, or set its "Python" field to that
+  environment's interpreter.
+- `numpy`: no Inscopix software needed (`pip install numpy scipy tifffile`).
+  Reads the binary `.isxd` format directly and re-implements the steps, so
+  results are close to, but not identical with, IDPS. No CNMFe; event sets
+  are written in this code's own format (use the CSV export).
+- `auto` (default): `isx` if installed, otherwise `numpy`.
+
+Load an `.isxd` file in Python:
+
+```python
+import isxd_numpy as ix
+mov = ix.IsxdMovie("rec.isxd")       # mov.shape, mov.period
+frames = mov.get_frames(0, 100)      # float32 (frames, height, width)
+```
