@@ -696,6 +696,60 @@ def auto_accept_reject(input_cell_set_files, input_event_set_files, filters=None
     log.info("  %d/%d cells accepted", statuses.count("accepted"), len(statuses))
 
 
+def write_tiff(path, img):
+    """Minimal uncompressed single-page grayscale TIFF (uint8, uint16 or float32);
+    no extra packages needed, readable by MATLAB imread, ImageJ, Python."""
+    img = np.ascontiguousarray(img)
+    if img.dtype not in (np.uint8, np.uint16, np.float32):
+        img = img.astype(np.float32)
+    h, w = img.shape
+    bits = img.dtype.itemsize * 8
+    fmt = 3 if img.dtype == np.float32 else 1           # SampleFormat: 3 float, 1 uint
+    data = img.astype(img.dtype.newbyteorder("<")).tobytes()
+    tags = [(256, 4, w), (257, 4, h), (258, 3, bits), (259, 3, 1), (262, 3, 1),
+            (273, 4, 0), (277, 3, 1), (278, 4, h), (279, 4, len(data)), (284, 3, 1),
+            (339, 3, fmt)]
+    ifd_off = 8
+    data_off = ifd_off + 2 + 12 * len(tags) + 4
+    out = bytearray(b"II*\x00" + struct.pack("<I", ifd_off))
+    out += struct.pack("<H", len(tags))
+    for tag, typ, val in tags:
+        if tag == 273:
+            val = data_off
+        if typ == 3:
+            out += struct.pack("<HHIHH", tag, typ, 1, val, 0)
+        else:
+            out += struct.pack("<HHII", tag, typ, 1, val)
+    out += struct.pack("<I", 0)
+    with open(path, "wb") as f:
+        f.write(bytes(out) + data)
+
+
+def cell_outline_masks(images):
+    """Per cell: boolean mask of the pixels >= 50% of the cell image maximum."""
+    return [(img >= 0.5 * img.max()) if img.max() > 0 else np.zeros(img.shape, bool)
+            for img in images]
+
+
+def write_cell_map(path, images, max_width=800):
+    """IDPS-style cell map: maximum projection of the (non-negative) cell images,
+    enlarged by an integer factor, with every cell's outline drawn in white
+    (= 65535, the image maximum) on a uint16 background kept below that value."""
+    images = [np.nan_to_num(np.asarray(im, dtype=np.float64)) for im in images]
+    h, w = images[0].shape
+    scale = int(max(1, min(8, max_width // max(w, 1))))
+    bg = np.max(np.clip(np.stack(images), 0, None), axis=0) if images else np.zeros((h, w))
+    bg = bg / (bg.max() or 1) * 60000
+    bg = np.kron(bg, np.ones((scale, scale)))
+    out = bg.astype(np.uint16)
+    for m in cell_outline_masks(images):
+        big = np.kron(m, np.ones((scale, scale), bool))
+        edge = big & ~ndimage.binary_erosion(big, border_value=0)
+        out[edge] = 65535
+    write_tiff(path, out)
+    return scale
+
+
 def _times(objs, time_ref):
     if time_ref == "tsc":
         raise ValueError("time_ref='tsc' is not supported by the NumPy backend")
@@ -722,24 +776,21 @@ def export_cell_set_to_csv_tiff(input_cell_set_files, output_csv_file, output_ti
             for t, row in zip(times, traces):
                 cw.writerow([f"{t:.6f}"] + [f"{v:.6g}" for v in row])
     if output_tiff_file:
-        try:
-            import tifffile
-        except ImportError:
-            tifffile = None
         base = os.path.splitext(output_tiff_file)[0]
         for i, n in enumerate(cs0.names):
-            img = cs0.get_image(i).astype(np.float32)
-            if tifffile:
-                tifffile.imwrite(f"{base}_{n}.tif", img)
-            else:
-                np.save(f"{base}_{n}.npy", img)
+            write_tiff(f"{base}_{n}.tif", cs0.get_image(i).astype(np.float32))
     if output_props_file:
+        # Same columns as the IDPS props export. Size = equivalent diameter (pixels)
+        # of the largest component of the cell image (>= 50% of its maximum).
         with open(output_props_file, "w", newline="") as f:
             cw = csv.writer(f)
-            cw.writerow(["Name", "Status", "NumComponents", "Size", "CentroidX", "CentroidY"])
+            cw.writerow(["Name", "Status", "ColorR", "ColorG", "ColorB", "CentroidX",
+                         "CentroidY", "NumComponents", "Size"])
             for i, n in enumerate(cs0.names):
-                comps, size, (cx, cy) = _cell_metrics(cs0.get_image(i))
-                cw.writerow([n, cs0.get_status(i), comps, size, f"{cx:.2f}", f"{cy:.2f}"])
+                comps, area, (cx, cy) = _cell_metrics(cs0.get_image(i))
+                diam = 2 * np.sqrt(area / np.pi)
+                cw.writerow([n, cs0.get_status(i), 255, 255, 255, f"{cx:.4f}", f"{cy:.4f}",
+                             comps, f"{diam:.4f}"])
 
 
 def export_event_set_to_csv(input_event_set_files, output_csv_file, time_ref="start",

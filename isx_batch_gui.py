@@ -138,7 +138,11 @@ TABS = [
     ("Export", [
         ("export_time_ref", "Time reference", "choice", ["start", "unix", "tsc"],
          "start = seconds from recording start; unix = epoch seconds; tsc = hardware counter."),
-        ("export_cell_images", "Export cell images (TIFF)", "bool", None, ""),
+        ("export_cell_map", "Export cell map (TIFF)", "bool", None,
+         "<name>_cellmap.tif: cell images with white outlines, as read by "
+         "plot_cellmap_and_traces.m."),
+        ("export_cell_images", "Export cell images (TIFF)", "bool", None,
+         "One <name>_cellimage_Cxx.tif per cell."),
         ("export_events_sparse", "Sparse event output", "bool", None,
          "On: one row per event. Off: one row per frame, one column per cell."),
         ("export_events_amplitude", "Write event amplitude", "bool", None,

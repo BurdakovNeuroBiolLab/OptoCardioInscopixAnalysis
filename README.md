@@ -78,7 +78,21 @@ Processes raw `.isxd` movies with the steps of Inscopix Data Processing (IDPS)
 
 preprocess → spatial filter → motion correction (mean-image reference) → crop
 to the valid area → DF/F → PCA-ICA or CNMFe → event detection → auto
-accept/reject → export (traces CSV, props CSV, cell TIFFs, events CSV).
+accept/reject → export.
+
+The exports are named so that `A_Parent_Align_Heka_Pupil_Inscopix` /
+`plot_cellmap_and_traces` find them: copy them into the recording folder
+next to the HEKA and pupil files.
+
+| Output | Contents |
+|---|---|
+| `<name>_celltrace.csv` | Cell traces (IDPS format: names row, status row, time + one column per cell) |
+| `<name>_celltrace-props.csv` | Cell props (Name, Status, ColorR/G/B, CentroidX/Y, NumComponents, Size) |
+| `<name>_cellmap.tif` | Cell map with the ROI outlines in white |
+| `<name>_cellimage_C00.tif` … | One image per cell |
+| `<name>_events.csv` | Detected events |
+
+`<name>` is the movie's file name (independent mode) or the series name.
 
 Defaults are the IDPS defaults, except spatial downsampling (2).
 

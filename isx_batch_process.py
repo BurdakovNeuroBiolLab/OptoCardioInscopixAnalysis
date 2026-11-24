@@ -13,7 +13,9 @@ Python API (`isx`). The steps and default parameters match the IDPS 1.9.x GUI:
       -> Cell identification: PCA-ICA (on DF/F) or CNMFe (on MC movie)     PCA-ICA / CNMFE
       -> Event detection                                                   ED
       -> Auto accept/reject                                                (in place)
-      -> Export traces (.csv), cell images (.tif), events (.csv)
+      -> Export, named for the MATLAB scripts in this repository:
+           <name>_celltrace.csv, <name>_celltrace-props.csv, <name>_cellmap.tif,
+           <name>_cellimage_C00.tif ..., <name>_events.csv
 
 Two ways to handle several input files:
   --mode independent  (default) Each file is its own session; it is processed on its own
@@ -54,6 +56,8 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import isxd_numpy  # noqa: E402  (cell map writer, used with both backends)
+
 isx = None  # set in main(): the IDPS `isx` API, or the isxd_numpy fallback
 
 
@@ -153,6 +157,7 @@ class Params:
     # Export
     export_time_ref: str = "start"              # 'start', 'unix' or 'tsc'
     export_cell_images: bool = True             # one .tif per cell
+    export_cell_map: bool = True                # <name>_cellmap.tif with white outlines
     export_events_sparse: bool = True           # events CSV: one row per event
     export_events_amplitude: bool = True        # events CSV: amplitude (else 1)
 
@@ -407,24 +412,46 @@ def process_group(inputs: List[str], out_dir: str, name: str, P: Params,
             log.warning("Auto accept/reject needs event sets; skipped.")
 
     # 8. Export. With several cell sets (series), isx writes one CSV covering all segments.
+    # 8. Export, named so A_Parent_Align_Heka_Pupil_Inscopix.m / plot_cellmap_and_traces.m
+    #    find them: <name>_celltrace.csv, <name>_celltrace-props.csv, <name>_cellmap.tif.
+    #    With several cell sets (series) the CSVs cover all segments.
     if "export" in steps:
-        method_tag = "CNMFE" if cellsets[0].endswith("-CNMFE.isxd") else "PCA-ICA"
-        traces_csv = os.path.join(out_dir, f"{name}-{method_tag}-traces.csv")
-        props_csv = os.path.join(out_dir, f"{name}-{method_tag}-props.csv")
-        tiff_prefix = os.path.join(out_dir, f"{name}-{method_tag}-cell")
+        traces_csv = os.path.join(out_dir, f"{name}_celltrace.csv")
+        props_csv = os.path.join(out_dir, f"{name}_celltrace-props.csv")
+        cellmap_tif = os.path.join(out_dir, f"{name}_cellmap.tif")
+        # per-cell images: <name>_cellimage_C00.tif ... (must not end in "cellmap.tif")
+        tiff_name = os.path.join(out_dir, f"{name}_cellimage.tif")
         if ready([traces_csv, props_csv], overwrite):
-            log.info("[export cells] -> %s", os.path.basename(traces_csv))
+            log.info("[export cells] -> %s, %s", os.path.basename(traces_csv),
+                     os.path.basename(props_csv))
             isx.export_cell_set_to_csv_tiff(cellsets, traces_csv,
-                                            tiff_prefix if P.export_cell_images else "",
+                                            tiff_name if P.export_cell_images else "",
                                             time_ref=P.export_time_ref,
                                             output_props_file=props_csv)
+        if P.export_cell_map and ready([cellmap_tif], overwrite):
+            log.info("[export cell map] -> %s", os.path.basename(cellmap_tif))
+            scale = isxd_numpy.write_cell_map(cellmap_tif, read_cell_images(cellsets[0]))
+            log.info("  cell map enlarged %dx", scale)
         if all(os.path.exists(e) for e in events):
-            events_csv = os.path.join(out_dir, f"{name}-ED.csv")
+            events_csv = os.path.join(out_dir, f"{name}_events.csv")
             if ready([events_csv], overwrite):
                 log.info("[export events] -> %s", os.path.basename(events_csv))
                 isx.export_event_set_to_csv(events, events_csv, time_ref=P.export_time_ref,
                                             sparse_output=P.export_events_sparse,
                                             write_amplitude=P.export_events_amplitude)
+
+
+def read_cell_images(cellset_path: str):
+    """Cell images of a cell set, through the isx API when it is the backend (reads any
+    IDPS cell set), otherwise through isxd_numpy."""
+    if hasattr(isx, "CellSet"):
+        cs = isx.CellSet.read(cellset_path)
+        try:
+            return [cs.get_cell_image_data(i) for i in range(cs.num_cells)]
+        finally:
+            cs.close()
+    cs = isxd_numpy.IsxdCellSet(cellset_path)
+    return [cs.get_image(i) for i in range(cs.num_cells)]
 
 
 def ready_extra(extra: List[str], main_outputs: List[str], overwrite: bool) -> bool:
