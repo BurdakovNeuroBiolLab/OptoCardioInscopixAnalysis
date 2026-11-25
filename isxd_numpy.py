@@ -11,7 +11,9 @@ either backend.
     [ binary data ][ JSON header ][ 0x00 ][ uint64 little-endian: JSON length ]
   Movie:    frames one after another, row-major, height x width pixels of dataType
             (0 = uint16, 1 = float32, 2 = uint8). nVista 3 raw files
-            ("hasFrameHeaderFooter": true) carry 2 extra rows above and 2 below each frame.
+            ("hasFrameHeaderFooter": true) carry a header before and a footer after each
+            frame (2 sensor rows each, i.e. 4 image rows when 2x binned to 640 px); their
+            size is measured from the file size.
   Image:    a movie with a single frame.
   Cell set: per cell, its image (height*width float32) then its trace (numTimes float32).
 
@@ -107,33 +109,90 @@ class IsxdMovie(_IsxdBase):
         super().__init__(path)
         h = self.header
         self.dtype = DTYPES[int(h.get("dataType", 0))]
-        hf = 4 if h.get("hasFrameHeaderFooter", False) else 0
-        self._rows = self.height + hf
-        self._row0 = 2 if hf else 0
-        fbytes = self._rows * self.width * np.dtype(self.dtype).itemsize
-        stored = self.data_end // fbytes
-        nt = self.num_times
-        if stored >= nt:
+        bpp = np.dtype(self.dtype).itemsize
+        img = self.height * self.width
+        nt, nd = self.num_times, len(self.dropped)
+        has_hf = bool(h.get("hasFrameHeaderFooter", False))
+
+        # Frame layout from the file size, not from assumptions: every stored frame is
+        # [header][height x width image][footer]. nVista 3 headers/footers are a fixed
+        # number of pixels of the full sensor width (e.g. 2 x 1280 px), which is a
+        # different number of image rows for binned / cropped movies, so the size must
+        # be measured. Dropped frames may or may not be stored.
+        layouts = []
+        for n in sorted({nt, nt - nd}, reverse=True):
+            if n > 0 and self.data_end % (n * bpp) == 0:
+                fpx = self.data_end // (n * bpp)
+                if fpx >= img:
+                    layouts.append((n, fpx))
+        if not layouts:
+            raise ValueError(
+                f"{os.path.basename(path)}: cannot work out the frame layout: "
+                f"{self.data_end} data bytes for {nt} frames ({nd} dropped) of "
+                f"{self.width} x {self.height} {np.dtype(self.dtype).name}. "
+                "Please report this file's header (isxd_numpy.read_header).")
+        # Several layouts can fit the file size (dropped frames stored or not). Keep the
+        # one whose frames show the same field of view from start to end: a wrong frame
+        # size makes every frame start a little further off, so they drift apart.
+        if len(layouts) > 1:
+            layouts.sort(key=lambda L: -self._layout_score(*L))
+        stored, fpx = layouts[0]
+        extra = fpx - img
+        self._fpx, self._img = fpx, img
+        self._mm = np.memmap(path, dtype=self.dtype, mode="r", shape=(stored, fpx))
+        self._hdr = self._find_header_size(self._mm, extra) if extra else 0
+        if extra:
+            log.info("  %s: frame header %d px + footer %d px (%.1f + %.1f image rows)",
+                     os.path.basename(path), self._hdr, extra - self._hdr,
+                     self._hdr / self.width, (extra - self._hdr) / self.width)
+
+        if stored == nt:  # dropped frames stored as blanks: replace them too
             idx = np.arange(nt)
-        elif stored == nt - len(self.dropped):  # dropped frames not stored
+            idx[[d for d in self.dropped if 0 <= d < nt]] = -1
+        else:  # dropped frames not stored
             keep = np.setdiff1d(np.arange(nt), self.dropped)
             idx = np.full(nt, -1)
             idx[keep] = np.arange(len(keep))
-        else:
-            log.warning("%s: %d frames stored, header says %d; reading what exists",
-                        path, stored, nt)
-            idx = np.full(nt, -1)
-            idx[:stored] = np.arange(stored)
-        # Fill dropped/missing frames with the nearest earlier stored frame.
+        # Fill dropped frames with the nearest earlier stored frame.
         for t in range(nt):
             if idx[t] < 0:
                 idx[t] = idx[t - 1] if t > 0 else -1
         if idx[0] < 0:
-            first = idx[idx >= 0][0]
-            idx[idx < 0] = first
+            idx[idx < 0] = idx[idx >= 0][0]
         self._idx = idx
-        self._mm = np.memmap(path, dtype=self.dtype, mode="r",
-                             shape=(stored, self._rows, self.width))
+
+    def _sample(self, mm, k=8):
+        idx = np.linspace(0, mm.shape[0] - 1, min(k, mm.shape[0])).astype(int)
+        return np.asarray(mm[idx], dtype=np.float64)
+
+    def _find_header_size(self, mm, extra):
+        """Split the extra pixels per frame into header and footer. Try every whole-row
+        split; a wrong split puts a metadata/image boundary inside the image, which
+        shows as a row-to-row jump far larger than the image's own row changes. Keep the
+        split whose image has the smallest such jump. Without whole rows, equal halves."""
+        w, h, img = self.width, self.height, self.width * self.height
+        if extra % w:
+            return extra // 2
+        buf = self._sample(mm).mean(0)
+        best, best_score = extra // 2, np.inf
+        for hs in range(0, extra + 1, w):
+            im = buf[hs:hs + img].reshape(h, w)
+            d = np.abs(np.diff(im, axis=0)).mean(1)
+            score = d.max() / (np.median(d) + 1e-9) + (1e-6 if hs != extra // 2 else 0)
+            if score < best_score:
+                best, best_score = hs, score
+        return best
+
+    def _layout_score(self, n, fpx):
+        """Mean correlation of frames across the movie with its first frame."""
+        mm = np.memmap(self.path, dtype=self.dtype, mode="r", shape=(n, fpx))
+        extra = fpx - self.height * self.width
+        hs = self._find_header_size(mm, extra) if extra else 0
+        fr = self._sample(mm)[:, hs:hs + self.height * self.width]
+        fr -= fr.mean(1, keepdims=True)
+        ref = fr[0]
+        c = [(f @ ref) / (np.linalg.norm(f) * np.linalg.norm(ref) + 1e-12) for f in fr[1:]]
+        return float(np.mean(c)) if c else 0.0
 
     @property
     def shape(self):
@@ -141,8 +200,8 @@ class IsxdMovie(_IsxdBase):
 
     def get_frames(self, start=0, stop=None):
         stop = self.num_times if stop is None else min(stop, self.num_times)
-        sel = self._mm[self._idx[start:stop], self._row0:self._row0 + self.height, :]
-        return np.asarray(sel, dtype=np.float32)
+        sel = self._mm[self._idx[start:stop], self._hdr:self._hdr + self._img]
+        return np.asarray(sel, dtype=np.float32).reshape(-1, self.height, self.width)
 
     def get_frame(self, t):
         return self.get_frames(t, t + 1)[0]
@@ -467,6 +526,14 @@ def motion_correct(input_movie_files, output_movie_files, max_translation=20,
                 wr.write(out)
         shifts = np.array(shifts)
         all_shifts.append(shifts)
+        at_limit = np.mean(np.any(np.abs(shifts) >= max_t - 0.5, axis=1))
+        log.info("  %s: shift x %.2f +/- %.2f px, y %.2f +/- %.2f px",
+                 os.path.basename(src), shifts[:, 1].mean(), shifts[:, 1].std(),
+                 shifts[:, 0].mean(), shifts[:, 0].std())
+        if at_limit > 0.01:
+            log.warning("  %s: %.0f%% of frames hit the maximum translation (%d px). "
+                        "Motion correction is probably failing; check the movie and "
+                        "the translations file.", os.path.basename(src), 100 * at_limit, max_t)
         if output_translation_files:
             with open(output_translation_files[i], "w", newline="") as f:
                 cw = csv.writer(f)
