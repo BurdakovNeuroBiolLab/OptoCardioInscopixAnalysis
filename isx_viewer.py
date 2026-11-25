@@ -33,7 +33,9 @@ import os
 import queue
 import re
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -633,6 +635,50 @@ class ResultsViewer(tk.Toplevel):
                        text=os.path.basename(path))
 
 
+# --------------------------------------------------------------------------------------
+# Starting from Spyder / Jupyter
+# --------------------------------------------------------------------------------------
+def in_ipython_kernel():
+    """True when running inside an IPython kernel (Spyder's console, Jupyter), where a
+    Tkinter window clashes with the console's own event loop."""
+    return any(m in sys.modules for m in ("ipykernel", "spyder_kernels")) \
+        or "SPYDER_ARGS" in os.environ
+
+
+def relaunch_outside_ipython(script, args=()):
+    """When started from Spyder's console (Run / F5) or Jupyter, start `script` again as
+    a separate Python process, so its window runs on its own and the console stays free.
+    Returns True if it relaunched (the caller should then stop), False otherwise.
+    Nothing to configure in Spyder: no 'Execute in an external system terminal'."""
+    if os.environ.get("ISX_NO_RELAUNCH") or not in_ipython_kernel():
+        return False
+    script = os.path.abspath(script)
+    env = dict(os.environ, ISX_NO_RELAUNCH="1")
+    for k in ("MPLBACKEND", "SPYDER_ARGS"):
+        env.pop(k, None)
+    log_path = os.path.join(tempfile.gettempdir(),
+                            os.path.splitext(os.path.basename(script))[0] + "_window.log")
+    kw = {}
+    if sys.platform.startswith("win"):
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    else:
+        kw["start_new_session"] = True
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen([sys.executable, script, *args], stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, env=env,
+                                cwd=os.path.dirname(script), **kw)
+    try:
+        code = proc.wait(timeout=3)          # a quick exit means it failed to start
+    except subprocess.TimeoutExpired:
+        print(f"{os.path.basename(script)} opened in its own window "
+              f"(messages go to {log_path}).")
+        return True
+    with open(log_path) as f:
+        msg = f.read().strip()
+    print(f"{os.path.basename(script)} could not open its window (exit code {code}):\n{msg}")
+    return True
+
+
 def main():
     root = tk.Tk()
     root.withdraw()
@@ -644,4 +690,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if not relaunch_outside_ipython(__file__, sys.argv[1:]):
+        main()

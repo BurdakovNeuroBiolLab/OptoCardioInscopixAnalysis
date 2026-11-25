@@ -103,6 +103,12 @@ Defaults are the IDPS defaults, except spatial downsampling (2).
 python isx_batch_gui.py
 ```
 
+In Spyder, open `isx_batch_gui.py` (or `isx_viewer.py`) and press Run (F5):
+started from Spyder's console or Jupyter, the window opens as its own process,
+so no "Execute in an external system terminal" setting is needed and the
+console stays free. If the window cannot start, the error is printed in the
+console.
+
 Add files or folders, choose an output folder, set any parameter (every IDPS
 1.9.x parameter has a field with an explanation) and press Run. Settings can be
 saved/loaded as JSON; each run also saves its parameters as

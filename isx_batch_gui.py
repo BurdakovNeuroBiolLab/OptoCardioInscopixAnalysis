@@ -3,7 +3,7 @@
 Graphical front end for isx_batch_process.py: pick .isxd files, set every processing
 parameter that Inscopix Data Processing 1.9.x offers, and batch-process them.
 
-    python isx_batch_gui.py
+    python isx_batch_gui.py        (or open it in Spyder and press Run / F5)
 
 Needs only the Python standard library (Tkinter) plus whatever the chosen backend needs.
 The processing runs in a separate Python process, so the window stays responsive and
@@ -811,4 +811,8 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    # From Spyder (Run / F5) or Jupyter the window is started as its own process, so no
+    # "Execute in an external system terminal" setting is needed.
+    from isx_viewer import relaunch_outside_ipython
+    if not relaunch_outside_ipython(__file__, sys.argv[1:]):
+        App().mainloop()
