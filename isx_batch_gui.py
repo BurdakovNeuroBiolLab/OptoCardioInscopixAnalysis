@@ -433,6 +433,7 @@ class App(tk.Tk):
         self.run_btn = ttk.Button(bb, text="Run", command=self.run)
         self.run_btn.pack(side="right", padx=4)
         ttk.Button(bb, text="Output…", command=self.open_out).pack(side="right")
+        ttk.Button(bb, text="View results…", command=self.view_results).pack(side="right", padx=4)
 
         pf = ttk.Frame(right)
         pf.pack(fill="x", pady=(6, 0))
@@ -640,6 +641,15 @@ class App(tk.Tk):
         d = filedialog.askdirectory()
         if d:
             self.out_dir.set(d)
+
+    def view_results(self):
+        """Open the results viewer on the output folder (or ask for a folder)."""
+        from isx_viewer import ResultsViewer
+        d = self.out_dir.get().strip()
+        have = bool(d) and os.path.isdir(d)
+        v = ResultsViewer(self, d if have else None)
+        if not have:
+            v.open_folder()
 
     def pick_python(self):
         p = filedialog.askopenfilename(title="Python interpreter (e.g. of the IDPS isx environment)")

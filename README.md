@@ -23,6 +23,7 @@ described under [Inscopix batch processing (Python)](#inscopix-batch-processing-
 | `isx_batch_gui.py` | Python GUI: select `.isxd` files, set parameters, batch process |
 | `isx_batch_process.py` | Python batch pipeline (command line), IDPS 1.9.x steps |
 | `isxd_numpy.py` | Reads/writes `.isxd` and re-implements the IDPS steps in NumPy/SciPy |
+| `isx_viewer.py` | Python viewer for processed results: cell map, traces, cell images |
 
 ## Usage
 
@@ -108,6 +109,16 @@ saved/loaded as JSON; each run also saves its parameters as
 `params_<date-time>.json` in the output folder. Cancel stops at once; the
 interrupted step is redone on the next run, and finished steps are skipped
 unless "Overwrite" is on.
+
+**Viewing results**
+
+"View results…" in the GUI (or `python isx_viewer.py <folder>`) opens every
+`*_celltrace.csv` found in the folder and its subfolders, with its props and
+cell map; IDPS exports work too. Left: the cell map with all ROI outlines in
+yellow. Right, bottom: the traces, 10 at a time (scroll for more), each with two
+check boxes. The left box selects the cell: its trace and outline get their own
+colour (several cells at once). The right box shows that cell's image above
+(one at a time), or "Cell Images Not Found" if no per-cell TIFFs were saved.
 
 **Command line**
 
