@@ -43,7 +43,7 @@ from scipy import ndimage, signal
 
 log = logging.getLogger("isx_batch")
 
-__version__ = "numpy-backend-1.0"
+__version__ = "numpy-backend-1.1"  # bump when results change: forces recomputation
 
 DTYPES = {0: np.uint16, 1: np.float32, 2: np.uint8}
 TYPE_MOVIE, TYPE_CELLSET, TYPE_IMAGE, TYPE_EVENTS = 0, 1, 4, 5

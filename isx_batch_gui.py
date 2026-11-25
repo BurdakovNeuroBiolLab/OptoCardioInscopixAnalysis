@@ -347,7 +347,7 @@ class App(tk.Tk):
         ttk.Button(rf, text="…", width=2, command=self.pick_python).grid(row=3, column=3)
         self.overwrite = tk.BooleanVar(value=False)
         self.cont = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rf, text="Overwrite existing outputs", variable=self.overwrite
+        ttk.Checkbutton(rf, text="Overwrite: redo all ticked steps", variable=self.overwrite
                         ).grid(row=4, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(rf, text="Continue with next file on error", variable=self.cont
                         ).grid(row=5, column=0, columnspan=3, sticky="w")
@@ -387,8 +387,11 @@ class App(tk.Tk):
                      ).grid(row=r, column=1, sticky="w", pady=(10, 0))
         self.widgets["method"] = ("choice", mv)
         ttk.Label(g, foreground="gray40", wraplength=380, justify="left", text=(
-            "Steps whose output files already exist are skipped unless 'Overwrite' is on, so "
-            "you can run the first steps, check the motion-corrected movie, then continue. "
+            "Rerunning only redoes what changed: a step runs again when its own settings "
+            "changed or an earlier step was redone, otherwise its existing output is reused "
+            "(e.g. a new number of ICs reruns PCA-ICA, events, accept/reject and export only). "
+            "Unticked steps reuse their existing output if there is one, otherwise they are "
+            "left out. 'Overwrite' redoes every ticked step. "
             "PCA-ICA runs on the DF/F movie; CNMFe runs on the motion-corrected movie.")
                   ).grid(row=r + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
@@ -762,7 +765,7 @@ class App(tk.Tk):
         step_names = {"[preprocess]": "pp", "[spatial filter]": "bp", "[motion correct]": "mc",
                       "[dF/F]": "dff", "[PCA-ICA]": "cells", "[CNMFe]": "cells",
                       "[event detection]": "events", "[auto accept/reject]": "accept",
-                      "[export cells]": "export"}
+                      "[export]": "export"}
         for key, s in step_names.items():
             if key in line:
                 self._done_steps += 1

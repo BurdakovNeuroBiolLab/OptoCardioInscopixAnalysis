@@ -107,8 +107,17 @@ Add files or folders, choose an output folder, set any parameter (every IDPS
 1.9.x parameter has a field with an explanation) and press Run. Settings can be
 saved/loaded as JSON; each run also saves its parameters as
 `params_<date-time>.json` in the output folder. Cancel stops at once; the
-interrupted step is redone on the next run, and finished steps are skipped
-unless "Overwrite" is on.
+interrupted step is redone on the next run.
+
+**Rerunning with changed settings** only redoes what changed. Each output
+folder keeps `<name>_steps.json`, recording which settings and earlier results
+produced each step's output. A step runs again when its own settings changed,
+an earlier step was redone, or its output is missing; otherwise the existing
+output is reused. For example, a new number of ICs or cell diameter reruns
+cell identification, event detection, accept/reject and export only; a new
+spatial downsampling reruns everything. Unticked steps reuse their existing
+output (the log warns if it was made with other settings). "Overwrite" redoes
+every ticked step.
 
 **Viewing results**
 

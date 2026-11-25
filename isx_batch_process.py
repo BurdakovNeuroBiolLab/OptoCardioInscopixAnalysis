@@ -47,6 +47,8 @@ Examples
 """
 
 import argparse
+import hashlib
+import json
 import glob
 import logging
 import os
@@ -59,6 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import isxd_numpy  # noqa: E402  (cell map writer, used with both backends)
 
 isx = None  # set in main(): the IDPS `isx` API, or the isxd_numpy fallback
+BACKEND = ""  # "isx" or "numpy"
 
 
 def load_backend(name):
@@ -228,28 +231,6 @@ def _marker(path: str) -> str:
     return path + ".incomplete"
 
 
-def ready(outputs: List[str], overwrite: bool) -> bool:
-    """isx refuses to overwrite files. Return True if the step should run. Outputs left
-    by an interrupted step (marked *.incomplete) are always redone."""
-    for o in outputs:
-        if os.path.exists(_marker(o)):
-            log.info("  removing incomplete output from an interrupted run: %s",
-                     os.path.basename(o))
-            if os.path.exists(o):
-                os.remove(o)
-            os.remove(_marker(o))
-    existing = [o for o in outputs if os.path.exists(o)]
-    if existing and not overwrite:
-        if len(existing) == len(outputs):
-            log.info("  outputs exist, skipping (use --overwrite to redo)")
-            return False
-        raise RuntimeError(f"Some outputs exist, some don't (partial run?): {existing}. "
-                           "Delete them or use --overwrite.")
-    for o in existing:
-        os.remove(o)
-    return True
-
-
 def read_crop_rect(path):
     """Last line of the motion-correction crop-rect CSV holding 4 integers."""
     rect = None
@@ -263,17 +244,138 @@ def read_crop_rect(path):
     return rect
 
 
-def run_step(name, func, outputs, overwrite, **kwargs):
-    log.info("[%s] -> %s", name, ", ".join(os.path.basename(o) for o in outputs))
-    if not ready(outputs, overwrite):
-        return
-    for o in outputs:
-        open(_marker(o), "w").close()
-    t0 = time.time()
-    func(**kwargs)
-    for o in outputs:
-        os.remove(_marker(o))
-    log.info("  done in %.1f s", time.time() - t0)
+# ----------------------------------------------------------------------------------------
+# Step bookkeeping: rerun only what changed
+# ----------------------------------------------------------------------------------------
+# Parameters each step depends on. A step is redone when these, or the result of a step it
+# builds on, change; otherwise its existing output is reused.
+STEP_PARAMS = {
+    "pp": ["temporal_downsample_factor", "spatial_downsample_factor", "crop_rect",
+           "fix_defective_pixels", "trim_early_frames"],
+    "bp": ["sf_low_cutoff", "sf_high_cutoff", "sf_retain_mean", "sf_subtract_global_minimum"],
+    "mean": [],
+    "mc": ["mc_max_translation", "mc_low_bandpass_cutoff", "mc_high_bandpass_cutoff",
+           "mc_use_mean_projection_reference", "mc_reference_file",
+           "mc_reference_segment_index", "mc_reference_frame_index",
+           "mc_global_registration_weight"],
+    "crop": ["mc_crop"],
+    "dff": ["f0_type"],
+    "pca-ica": ["num_ics", "num_pcs", "unmix_type", "ica_temporal_weight", "max_iterations",
+                "convergence_threshold", "block_size", "auto_estimate_num_ics",
+                "average_cell_diameter"],
+    "cnmfe": ["cell_diameter", "min_corr", "min_pnr", "bg_spatial_subsampling",
+              "ring_size_factor", "gaussian_kernel_size", "closing_kernel_size",
+              "merge_threshold", "processing_mode", "num_threads", "patch_size",
+              "patch_overlap", "output_unit_type"],
+    "events": ["ed_threshold", "ed_tau", "ed_event_time_ref", "ed_ignore_negative_transients",
+               "ed_accepted_cells_only"],
+    "accept": ["accept_filters"],
+    "export": ["export_time_ref", "export_cell_images", "export_cell_map",
+               "export_events_sparse", "export_events_amplitude"],
+}
+
+
+def _file_sig(path: str):
+    """Identifies an input file without reading it: name and size."""
+    try:
+        return [os.path.basename(path), os.path.getsize(path)]
+    except OSError:
+        return [os.path.basename(path), None]
+
+
+class StepRecord:
+    """Remembers, per output folder, which parameters and upstream results produced each
+    step's outputs (<name>_steps.json), and decides what to run, reuse or skip."""
+
+    def __init__(self, out_dir, name, P, overwrite, root):
+        self.path = os.path.join(out_dir, f"{name}_steps.json")
+        self.P, self.overwrite = P, overwrite
+        self.keys = {"raw": self._hash(root)}
+        self.ran = set()
+        try:
+            with open(self.path) as f:
+                self.rec = json.load(f)
+        except (OSError, ValueError):
+            self.rec = {}
+
+    @staticmethod
+    def _hash(obj):
+        return hashlib.sha1(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+    def _params(self, step, extra=None):
+        d = {k: getattr(self.P, k) for k in STEP_PARAMS.get(step, [])}
+        if step == "mc" and self.P.mc_reference_file:
+            d["reference_sig"] = _file_sig(self.P.mc_reference_file)
+        d.update(extra or {})
+        return json.loads(json.dumps(d, default=str))   # same form as read back from file
+
+    def _save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.rec, f, indent=1, default=str)
+        os.replace(tmp, self.path)
+
+    def step(self, step, label, outputs, deps, enabled, run, extra_params=None, side=()):
+        """Run, reuse or skip one step. Returns True when its outputs are available
+        (computed now or earlier), False when it is skipped (no outputs)."""
+        params = self._params(step, extra_params)
+        key = self._hash({"step": step, "params": params,
+                          "deps": [self.keys[d] for d in deps]})
+        for o in outputs:                    # leftovers of an interrupted run
+            if os.path.exists(_marker(o)):
+                log.info("  removing incomplete output from an interrupted run: %s",
+                         os.path.basename(o))
+                for f in (o, _marker(o)):
+                    if os.path.exists(f):
+                        os.remove(f)
+                self.rec.pop(step, None)
+        exist = all(os.path.exists(o) for o in outputs)
+        rec = self.rec.get(step)
+        names = ", ".join(os.path.basename(o) for o in outputs) or "in place"
+
+        if not enabled:
+            if exist and (outputs or rec):
+                stale = rec is None or rec.get("key") != key
+                self.keys[step] = rec["key"] if rec else key
+                log.info("[%s] not selected; using existing %s%s", label, names,
+                         " (made with other settings; tick the step to update it)"
+                         if stale else "")
+                return True
+            self.keys[step] = self.keys[deps[0]] if deps else key
+            return False
+
+        reason = ("overwrite" if self.overwrite else
+                  "no output yet" if not exist else
+                  "no record of the settings used" if rec is None else
+                  "earlier step redone" if any(d in self.ran for d in deps) else
+                  "settings changed" if rec.get("key") != key else None)
+        self.keys[step] = key
+        if reason is None:
+            log.info("[%s] unchanged, reusing %s", label, names)
+            return True
+        log.info("[%s] -> %s (%s)", label, names, reason)
+        if rec and rec.get("params") != params and rec.get("params") is not None:
+            changed = sorted(k for k in set(params) | set(rec["params"])
+                             if params.get(k) != rec["params"].get(k))
+            if changed:
+                log.info("  changed: %s", ", ".join(changed))
+        for f in list(outputs) + list(side):
+            if os.path.exists(f):
+                os.remove(f)
+        for o in outputs:
+            open(_marker(o), "w").close()
+        t0 = time.time()
+        run()
+        for o in outputs:
+            if os.path.exists(_marker(o)):
+                os.remove(_marker(o))
+        self.rec[step] = {"key": key, "params": params,
+                          "outputs": [os.path.basename(o) for o in outputs],
+                          "finished": time.strftime("%Y-%m-%d %H:%M:%S")}
+        self._save()
+        self.ran.add(step)
+        log.info("  done in %.1f s", time.time() - t0)
+        return True
 
 
 # ----------------------------------------------------------------------------------------
@@ -283,162 +385,159 @@ def process_group(inputs: List[str], out_dir: str, name: str, P: Params,
                   steps: List[str], overwrite: bool) -> None:
     os.makedirs(out_dir, exist_ok=True)
     log.info("=== %s: %d file(s) -> %s", name, len(inputs), out_dir)
-    current = inputs
+    root = {"inputs": [_file_sig(f) for f in inputs], "backend": BACKEND,
+            "backend_version": getattr(isx, "__version__", "")}
+    R = StepRecord(out_dir, name, P, overwrite, root)
+    current, last = inputs, "raw"
 
     # 1. Preprocess
-    if "pp" in steps:
-        pp = out_paths(current, out_dir, "PP")
-        run_step("preprocess", isx.preprocess, pp, overwrite,
-                 input_movie_files=current, output_movie_files=pp,
-                 temporal_downsample_factor=P.temporal_downsample_factor,
-                 spatial_downsample_factor=P.spatial_downsample_factor,
-                 crop_rect=P.crop_rect,
-                 fix_defective_pixels=P.fix_defective_pixels,
-                 trim_early_frames=P.trim_early_frames)
-        current = pp
+    pp = out_paths(current, out_dir, "PP")
+    if R.step("pp", "preprocess", pp, [last], "pp" in steps, lambda: isx.preprocess(
+            input_movie_files=inputs, output_movie_files=pp,
+            temporal_downsample_factor=P.temporal_downsample_factor,
+            spatial_downsample_factor=P.spatial_downsample_factor,
+            crop_rect=P.crop_rect, fix_defective_pixels=P.fix_defective_pixels,
+            trim_early_frames=P.trim_early_frames)):
+        current, last = pp, "pp"
 
     # 2. Spatial band-pass filter
-    if "bp" in steps:
-        bp = out_paths(current, out_dir, "BP")
-        run_step("spatial filter", isx.spatial_filter, bp, overwrite,
-                 input_movie_files=current, output_movie_files=bp,
-                 low_cutoff=P.sf_low_cutoff, high_cutoff=P.sf_high_cutoff,
-                 retain_mean=P.sf_retain_mean,
-                 subtract_global_minimum=P.sf_subtract_global_minimum)
-        current = bp
+    src = current
+    bp = out_paths(src, out_dir, "BP")
+    filtered = R.step("bp", "spatial filter", bp, [last], "bp" in steps, lambda: isx.spatial_filter(
+            input_movie_files=src, output_movie_files=bp,
+            low_cutoff=P.sf_low_cutoff, high_cutoff=P.sf_high_cutoff,
+            retain_mean=P.sf_retain_mean, subtract_global_minimum=P.sf_subtract_global_minimum))
+    if filtered:
+        current, last = bp, "bp"
+    # Without a spatially filtered movie, motion correction band-passes internally
+    # (IDPS default cutoffs) unless cutoffs were given.
+    mc_lo, mc_hi = P.mc_low_bandpass_cutoff, P.mc_high_bandpass_cutoff
+    if not filtered and mc_lo is None and mc_hi is None:
+        mc_lo, mc_hi = 0.004, 0.016
 
-    # 3. Motion correction (reference = mean projection of the filtered movie(s))
-    if "mc" in steps:
-        mc = out_paths(current, out_dir, "MC")
-        translations = out_paths(current, out_dir, "translations", "csv")
-        crop_file = os.path.join(out_dir, f"{name}-crop_rect.csv")
-        ref = P.mc_reference_file or ""
-        if not ref and P.mc_use_mean_projection_reference:
-            ref = os.path.join(out_dir, f"{name}-MEAN.isxd")
-            run_step("mean projection", isx.project_movie, [ref], overwrite,
-                     input_movie_files=current, output_image_file=ref, stat_type="mean")
-        if ready_extra(translations + [crop_file], mc, overwrite):
-            run_step("motion correct", isx.motion_correct, mc, overwrite,
-                     input_movie_files=current, output_movie_files=mc,
-                     max_translation=P.mc_max_translation,
-                     low_bandpass_cutoff=P.mc_low_bandpass_cutoff,
-                     high_bandpass_cutoff=P.mc_high_bandpass_cutoff,
-                     reference_segment_index=P.mc_reference_segment_index,
-                     reference_frame_index=P.mc_reference_frame_index,
-                     reference_file_name=ref,
-                     global_registration_weight=P.mc_global_registration_weight,
-                     output_translation_files=translations,
-                     output_crop_rect_file=crop_file)
-        current = mc
+    # 3. Motion correction (reference = mean projection of the filtered movie(s)), then crop
+    src = current
+    mc = out_paths(src, out_dir, "MC")
+    translations = out_paths(src, out_dir, "translations", "csv")
+    crop_file = os.path.join(out_dir, f"{name}-crop_rect.csv")
+    ref, mc_deps = P.mc_reference_file or "", [last]
+    if not ref and P.mc_use_mean_projection_reference:
+        ref = os.path.join(out_dir, f"{name}-MEAN.isxd")
+        R.step("mean", "mean projection", [ref], [last], "mc" in steps,
+               lambda: isx.project_movie(input_movie_files=src, output_image_file=ref,
+                                         stat_type="mean"))
+        mc_deps = [last, "mean"]
+    if R.step("mc", "motion correct", mc, mc_deps, "mc" in steps, lambda: isx.motion_correct(
+            input_movie_files=src, output_movie_files=mc,
+            max_translation=P.mc_max_translation,
+            low_bandpass_cutoff=mc_lo, high_bandpass_cutoff=mc_hi,
+            reference_segment_index=P.mc_reference_segment_index,
+            reference_frame_index=P.mc_reference_frame_index,
+            reference_file_name=ref,
+            global_registration_weight=P.mc_global_registration_weight,
+            output_translation_files=translations, output_crop_rect_file=crop_file),
+            side=translations + [crop_file],
+            extra_params={"bandpass_used": [mc_lo, mc_hi]}):
+        current, last = mc, "mc"
         if P.mc_crop and os.path.exists(crop_file):
+            src = current
+            cropped = out_paths(src, out_dir, "CROP")
             rect = read_crop_rect(crop_file)
-            cropped = out_paths(current, out_dir, "CROP")
-            log.info("  crop rect (top, left, bottom, right) = %s", rect)
-            run_step("crop", isx.preprocess, cropped, overwrite,
-                     input_movie_files=current, output_movie_files=cropped,
-                     crop_rect=rect, fix_defective_pixels=False, trim_early_frames=False)
-            current = cropped
-    mc_movies = current
+            if R.step("crop", "crop", cropped, [last], "mc" in steps,
+                      lambda: (log.info("  crop rect (top, left, bottom, right) = %s", rect),
+                               isx.preprocess(input_movie_files=src, output_movie_files=cropped,
+                                              crop_rect=rect, fix_defective_pixels=False,
+                                              trim_early_frames=False))):
+                current, last = cropped, "crop"
+    mc_movies, mc_last = current, last
 
     # 4. DF/F
-    if "dff" in steps:
-        dff = out_paths(current, out_dir, "DFF")
-        run_step("dF/F", isx.dff, dff, overwrite,
-                 input_movie_files=current, output_movie_files=dff, f0_type=P.f0_type)
-        current = dff
+    src = current
+    dff = out_paths(src, out_dir, "DFF")
+    if R.step("dff", "dF/F", dff, [last], "dff" in steps,
+              lambda: isx.dff(input_movie_files=src, output_movie_files=dff, f0_type=P.f0_type)):
+        current, last = dff, "dff"
 
     # 5. Cell identification -> one cell set per input movie (series: one per segment)
-    cellsets = None
-    if "cells" in steps:
-        if P.method == "pca-ica":
-            cellsets = out_paths(current, out_dir, "PCA-ICA")
-            num_pcs = P.num_pcs or int(round(1.2 * P.num_ics))
-            run_step("PCA-ICA", isx.pca_ica, cellsets, overwrite,
-                     input_movie_files=current, output_cell_set_files=cellsets,
-                     num_pcs=num_pcs, num_ics=P.num_ics, unmix_type=P.unmix_type,
-                     ica_temporal_weight=P.ica_temporal_weight,
-                     max_iterations=P.max_iterations,
-                     convergence_threshold=P.convergence_threshold,
-                     block_size=P.block_size,
-                     auto_estimate_num_ics=P.auto_estimate_num_ics,
-                     average_cell_diameter=P.average_cell_diameter)
-        elif P.method == "cnmfe":
-            # CNMFe models the background itself, so IDPS runs it on the motion-corrected
-            # movie, not on DF/F.
-            cellsets = out_paths(mc_movies, out_dir, "CNMFE")
-            run_step("CNMFe", isx.cnmfe, cellsets, overwrite,
-                     input_movie_files=mc_movies, output_cell_set_files=cellsets,
-                     output_dir=out_dir,
-                     cell_diameter=P.cell_diameter, min_corr=P.min_corr, min_pnr=P.min_pnr,
-                     bg_spatial_subsampling=P.bg_spatial_subsampling,
-                     ring_size_factor=P.ring_size_factor,
-                     gaussian_kernel_size=P.gaussian_kernel_size,
-                     closing_kernel_size=P.closing_kernel_size,
-                     merge_threshold=P.merge_threshold,
-                     processing_mode=P.processing_mode, num_threads=P.num_threads,
-                     patch_size=P.patch_size, patch_overlap=P.patch_overlap,
-                     output_unit_type=P.output_unit_type)
-        else:
-            raise ValueError(f"Unknown cell identification method: {P.method}")
+    if P.method == "pca-ica":
+        src, cell_dep = current, last
+        cellsets = out_paths(src, out_dir, "PCA-ICA")
+        num_pcs = P.num_pcs or int(round(1.2 * P.num_ics))
+        run_cells = lambda: isx.pca_ica(  # noqa: E731
+            input_movie_files=src, output_cell_set_files=cellsets,
+            num_pcs=num_pcs, num_ics=P.num_ics, unmix_type=P.unmix_type,
+            ica_temporal_weight=P.ica_temporal_weight, max_iterations=P.max_iterations,
+            convergence_threshold=P.convergence_threshold, block_size=P.block_size,
+            auto_estimate_num_ics=P.auto_estimate_num_ics,
+            average_cell_diameter=P.average_cell_diameter)
+        label = "PCA-ICA"
+    elif P.method == "cnmfe":
+        # CNMFe models the background itself, so IDPS runs it on the motion-corrected
+        # movie, not on DF/F.
+        src, cell_dep = mc_movies, mc_last
+        cellsets = out_paths(src, out_dir, "CNMFE")
+        run_cells = lambda: isx.cnmfe(  # noqa: E731
+            input_movie_files=src, output_cell_set_files=cellsets, output_dir=out_dir,
+            cell_diameter=P.cell_diameter, min_corr=P.min_corr, min_pnr=P.min_pnr,
+            bg_spatial_subsampling=P.bg_spatial_subsampling,
+            ring_size_factor=P.ring_size_factor, gaussian_kernel_size=P.gaussian_kernel_size,
+            closing_kernel_size=P.closing_kernel_size, merge_threshold=P.merge_threshold,
+            processing_mode=P.processing_mode, num_threads=P.num_threads,
+            patch_size=P.patch_size, patch_overlap=P.patch_overlap,
+            output_unit_type=P.output_unit_type)
+        label = "CNMFe"
     else:
-        # Allow later steps to run on cell sets produced earlier.
-        for suffix in ("PCA-ICA", "CNMFE"):
-            cand = out_paths(mc_movies if suffix == "CNMFE" else current, out_dir, suffix)
-            if all(os.path.exists(c) for c in cand):
-                cellsets = cand
-                break
-
-    if cellsets is None:
+        raise ValueError(f"Unknown cell identification method: {P.method}")
+    if not R.step(P.method, label, cellsets, [cell_dep], "cells" in steps, run_cells):
         if any(s in steps for s in ("events", "accept", "export")):
             log.warning("No cell sets available; skipping events/accept/export.")
         return
 
     # 6. Event detection
     events = out_paths(cellsets, out_dir, "ED")
-    if "events" in steps:
-        run_step("event detection", isx.event_detection, events, overwrite,
-                 input_cell_set_files=cellsets, output_event_set_files=events,
-                 threshold=P.ed_threshold, tau=P.ed_tau,
-                 event_time_ref=P.ed_event_time_ref,
-                 ignore_negative_transients=P.ed_ignore_negative_transients,
-                 accepted_cells_only=P.ed_accepted_cells_only)
+    have_events = R.step("events", "event detection", events, [P.method], "events" in steps,
+                         lambda: isx.event_detection(
+                             input_cell_set_files=cellsets, output_event_set_files=events,
+                             threshold=P.ed_threshold, tau=P.ed_tau,
+                             event_time_ref=P.ed_event_time_ref,
+                             ignore_negative_transients=P.ed_ignore_negative_transients,
+                             accepted_cells_only=P.ed_accepted_cells_only))
 
-    # 7. Auto accept/reject (modifies the cell sets in place)
-    if "accept" in steps:
-        if all(os.path.exists(e) for e in events):
-            log.info("[auto accept/reject] filters=%s", P.accept_filters)
-            isx.auto_accept_reject(cellsets, events, filters=P.accept_filters)
-        else:
-            log.warning("Auto accept/reject needs event sets; skipped.")
+    # 7. Auto accept/reject (changes the cell statuses inside the cell sets)
+    if have_events:
+        R.step("accept", "auto accept/reject", [], [P.method, "events"], "accept" in steps,
+               lambda: (log.info("  filters=%s", P.accept_filters),
+                        isx.auto_accept_reject(cellsets, events, filters=P.accept_filters)))
+    elif "accept" in steps:
+        log.warning("Auto accept/reject needs event sets; skipped.")
 
-    # 8. Export. With several cell sets (series), isx writes one CSV covering all segments.
     # 8. Export, named so A_Parent_Align_Heka_Pupil_Inscopix.m / plot_cellmap_and_traces.m
     #    find them: <name>_celltrace.csv, <name>_celltrace-props.csv, <name>_cellmap.tif.
     #    With several cell sets (series) the CSVs cover all segments.
-    if "export" in steps:
-        traces_csv = os.path.join(out_dir, f"{name}_celltrace.csv")
-        props_csv = os.path.join(out_dir, f"{name}_celltrace-props.csv")
-        cellmap_tif = os.path.join(out_dir, f"{name}_cellmap.tif")
-        # per-cell images: <name>_cellimage_C00.tif ... (must not end in "cellmap.tif")
-        tiff_name = os.path.join(out_dir, f"{name}_cellimage.tif")
-        if ready([traces_csv, props_csv], overwrite):
-            log.info("[export cells] -> %s, %s", os.path.basename(traces_csv),
-                     os.path.basename(props_csv))
-            isx.export_cell_set_to_csv_tiff(cellsets, traces_csv,
-                                            tiff_name if P.export_cell_images else "",
-                                            time_ref=P.export_time_ref,
-                                            output_props_file=props_csv)
-        if P.export_cell_map and ready([cellmap_tif], overwrite):
-            log.info("[export cell map] -> %s", os.path.basename(cellmap_tif))
+    traces_csv = os.path.join(out_dir, f"{name}_celltrace.csv")
+    props_csv = os.path.join(out_dir, f"{name}_celltrace-props.csv")
+    cellmap_tif = os.path.join(out_dir, f"{name}_cellmap.tif")
+    events_csv = os.path.join(out_dir, f"{name}_events.csv")
+    # per-cell images: <name>_cellimage_C00.tif ... (must not end in "cellmap.tif")
+    tiff_name = os.path.join(out_dir, f"{name}_cellimage.tif")
+    outputs = [traces_csv, props_csv] + ([cellmap_tif] if P.export_cell_map else []) \
+        + ([events_csv] if have_events else [])
+    old_images = glob.glob(os.path.join(glob.escape(out_dir), f"{glob.escape(name)}_cellimage_*.tif"))
+
+    def export():
+        isx.export_cell_set_to_csv_tiff(cellsets, traces_csv,
+                                        tiff_name if P.export_cell_images else "",
+                                        time_ref=P.export_time_ref, output_props_file=props_csv)
+        if P.export_cell_map:
             scale = isxd_numpy.write_cell_map(cellmap_tif, read_cell_images(cellsets[0]))
             log.info("  cell map enlarged %dx", scale)
-        if all(os.path.exists(e) for e in events):
-            events_csv = os.path.join(out_dir, f"{name}_events.csv")
-            if ready([events_csv], overwrite):
-                log.info("[export events] -> %s", os.path.basename(events_csv))
-                isx.export_event_set_to_csv(events, events_csv, time_ref=P.export_time_ref,
-                                            sparse_output=P.export_events_sparse,
-                                            write_amplitude=P.export_events_amplitude)
+        if have_events:
+            isx.export_event_set_to_csv(events, events_csv, time_ref=P.export_time_ref,
+                                        sparse_output=P.export_events_sparse,
+                                        write_amplitude=P.export_events_amplitude)
+    R.step("export", "export", outputs,
+           [P.method] + (["events", "accept"] if have_events else []),
+           "export" in steps, export, side=old_images)
 
 
 def read_cell_images(cellset_path: str):
@@ -452,17 +551,6 @@ def read_cell_images(cellset_path: str):
             cs.close()
     cs = isxd_numpy.IsxdCellSet(cellset_path)
     return [cs.get_image(i) for i in range(cs.num_cells)]
-
-
-def ready_extra(extra: List[str], main_outputs: List[str], overwrite: bool) -> bool:
-    """Side outputs (translations, crop rect) must be cleared when the main step reruns."""
-    main_exist = all(os.path.exists(o) for o in main_outputs)
-    if main_exist and not overwrite:
-        return True  # run_step will report the skip
-    for e in extra:
-        if os.path.exists(e):
-            os.remove(e)
-    return True
 
 
 # ----------------------------------------------------------------------------------------
@@ -539,9 +627,6 @@ def build_params(a) -> Params:
     P.ed_threshold, P.ed_tau = a.ed_threshold, a.ed_tau
     P.accept_filters = [("# Comps", "=", 1), ("Cell Size", ">", 0), ("SNR", ">", a.min_snr)]
     P.export_time_ref = a.time_ref
-    # If spatial filtering is skipped, let motion correction band-pass internally (GUI default).
-    if "bp" not in a.steps:
-        P.mc_low_bandpass_cutoff, P.mc_high_bandpass_cutoff = 0.004, 0.016
     return P
 
 
@@ -558,8 +643,9 @@ def main(argv=None):
         sys.exit("No .isxd files found.")
     P = build_params(a)
     steps = [s for s in ALL_STEPS if s in a.steps]
-    global isx
+    global isx, BACKEND
     isx, backend = load_backend(a.backend)
+    BACKEND = backend
     log.info("backend: %s (version %s)", backend, getattr(isx, "__version__", "unknown"))
     log.info("%d input file(s), mode=%s, steps=%s", len(files), a.mode, steps)
     log.info("parameters: %s", asdict(P))
