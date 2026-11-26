@@ -24,6 +24,7 @@ described under [Inscopix batch processing (Python)](#inscopix-batch-processing-
 | `isx_batch_process.py` | Python batch pipeline (command line), IDPS 1.9.x steps |
 | `isxd_numpy.py` | Reads/writes `.isxd` and re-implements the IDPS steps in NumPy/SciPy |
 | `isx_viewer.py` | Python viewer for processed results: cell map, traces, cell images |
+| `cell_quality.py` | Cell likelihood score and duplicate-ROI rejection (viewer and pipeline) |
 
 ## Usage
 
@@ -131,23 +132,40 @@ every ticked step.
 `*_celltrace.csv` found in the folder and its subfolders, with its props and
 cell map; IDPS exports work too.
 
-- Left: the cell map with all ROI outlines in yellow. Click an ROI to select or
-  deselect it; mouse wheel zooms around the cursor, dragging pans, and
+- Left: the cell map with all ROI outlines in yellow. Click anywhere inside an
+  ROI to select or deselect it; mouse wheel zooms around the cursor, dragging pans, and
   +/−/Fit above the map do the same. "Show unselected ROIs" off leaves only
   the selected outlines.
-- Right, bottom: the traces, 10 at a time (scroll for more), each with two
-  check boxes. The left box selects the cell: its trace and outline get their
+- Right, bottom: the traces, most likely cell first, 10 at a time (scroll for
+  more), each with two check boxes. The left box selects the cell: its trace and outline get their
   own colour (several cells at once). The right box shows that cell's image
   above (one at a time), or "Cell Images Not Found" if no per-cell TIFFs were
   saved.
+- "Hide rejected cells" hides rejected traces and outlines, except cells you
+  selected. "Reject duplicates" (on by default) rejects duplicate ROIs, marked
+  "dup" (see below).
 - "Save traces…" writes the trace matrix of all cells with the selection:
-  CSV (header rows: cell names, software status, software rejected 1/0, user
-  selected 1/0, selection colour; then time + one column per cell) or, with
+  CSV (header rows: cell names, software status, software rejected 1/0,
+  rejection reason, likelihood rank, user selected 1/0, selection colour; then
+  time + one column per cell) or, with
   SciPy installed, a MATLAB `.mat` file (`t`, `traces`, `cellNames`,
-  `softwareStatus`, `softwareRejected`, `userSelected`, `selectionColour`,
-  `centroidX`, `centroidY`). The default name,
+  `softwareStatus`, `softwareRejected`, `rejectReason`, `likelihoodRank`,
+  `likelihoodScore`, `userSelected`, `selectionColour`, `centroidX`, `centroidY`). The default name,
   `<name>_celltrace-selection.csv`, does not clash with the `*celltrace.csv`
   the MATLAB scripts look for.
+
+**Cell likelihood and duplicate ROIs** (`cell_quality.py`)
+
+Each ROI gets a score: log(1 + SNR) of its trace (slow drift removed; SNR =
+99.9th percentile minus median, over the frame-to-frame noise), minus 0.5 per
+extra component, minus 0.5 × |log(Size / median Size)|, plus 1 if accepted or
+minus 3 if rejected. Two ROIs whose centroids are closer than 0.25 × the
+average cell diameter (mean props Size) are the same cell unless their traces
+correlate less than 0.5 (substantially different firing): the higher-scoring
+one is kept, the other rejected as "duplicate of Cxx". The pipeline applies
+this to the exported `*_celltrace-props.csv` (Status, new RejectReason column)
+and the status row of `*_celltrace.csv`, so the MATLAB scripts see it; the
+distance fraction and correlation are in the GUI's Accept/reject section.
 
 **Command line**
 

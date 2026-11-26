@@ -59,6 +59,7 @@ from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import isxd_numpy  # noqa: E402  (cell map writer, used with both backends)
+import cell_quality  # noqa: E402  (duplicate ROI rejection on the exports)
 
 isx = None  # set in main(): the IDPS `isx` API, or the isxd_numpy fallback
 BACKEND = ""  # "isx" or "numpy"
@@ -156,6 +157,11 @@ class Params:
     accept_filters: List[Tuple[str, str, float]] = field(
         default_factory=lambda: [("# Comps", "=", 1), ("Cell Size", ">", 0), ("SNR", ">", 3)]
     )
+
+    # Duplicate ROIs (applied to the exported CSVs, see cell_quality.py)
+    reject_duplicates: bool = True
+    dup_distance_frac: float = 0.25     # x average cell diameter
+    dup_min_corr: float = 0.5           # traces less correlated than this = different cells
 
     # Export
     export_time_ref: str = "start"              # 'start', 'unix' or 'tsc'
@@ -271,7 +277,8 @@ STEP_PARAMS = {
                "ed_accepted_cells_only"],
     "accept": ["accept_filters"],
     "export": ["export_time_ref", "export_cell_images", "export_cell_map",
-               "export_events_sparse", "export_events_amplitude"],
+               "export_events_sparse", "export_events_amplitude",
+               "reject_duplicates", "dup_distance_frac", "dup_min_corr"],
 }
 
 
@@ -304,6 +311,8 @@ class StepRecord:
 
     def _params(self, step, extra=None):
         d = {k: getattr(self.P, k) for k in STEP_PARAMS.get(step, [])}
+        if "accept_filters" in d:          # 1 and 1.0 are the same filter
+            d["accept_filters"] = [[m, o, float(v)] for m, o, v in d["accept_filters"]]
         if step == "mc" and self.P.mc_reference_file:
             d["reference_sig"] = _file_sig(self.P.mc_reference_file)
         d.update(extra or {})
@@ -535,6 +544,11 @@ def process_group(inputs: List[str], out_dir: str, name: str, P: Params,
             isx.export_event_set_to_csv(events, events_csv, time_ref=P.export_time_ref,
                                         sparse_output=P.export_events_sparse,
                                         write_amplitude=P.export_events_amplitude)
+        if P.reject_duplicates:
+            pairs = cell_quality.reject_duplicates_in_exports(
+                props_csv, traces_csv, P.dup_distance_frac, P.dup_min_corr)
+            log.info("  duplicate ROIs rejected: %s", ", ".join(f"{a} (dup. of {b})"
+                                                          for a, b in pairs) or "none")
     R.step("export", "export", outputs,
            [P.method] + (["events", "accept"] if have_events else []),
            "export" in steps, export, side=old_images)

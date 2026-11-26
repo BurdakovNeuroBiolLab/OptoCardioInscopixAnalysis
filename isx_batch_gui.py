@@ -134,6 +134,13 @@ TABS = [
     ("Accept/reject", [
         ("accept_filters", "Filters", "filters", None,
          "A cell is accepted when it passes every filter, otherwise rejected."),
+        ("reject_duplicates", "Reject duplicate ROIs", "bool", None,
+         "ROIs whose centroids are very close are the same cell unless their traces differ: "
+         "the most cell-like one is kept, the others are rejected (in the exported CSVs)."),
+        ("dup_distance_frac", "Duplicate distance (x cell diameter)", "float", None,
+         "Centroids closer than this fraction of the average cell diameter (props Size)."),
+        ("dup_min_corr", "Different-firing correlation", "float", None,
+         "Close ROIs whose traces correlate less than this are kept as different cells."),
     ]),
     ("Export", [
         ("export_time_ref", "Time reference", "choice", ["start", "unix", "tsc"],

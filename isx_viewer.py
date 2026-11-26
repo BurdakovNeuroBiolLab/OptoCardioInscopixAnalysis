@@ -42,6 +42,9 @@ from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cell_quality  # noqa: E402
+
 YELLOW = "#ffd400"
 SELECT_COLOURS = ["#00e5ff", "#ff4081", "#76ff03", "#ff9100", "#d500f9", "#2979ff",
                   "#ff1744", "#1de9b6", "#c6ff00", "#f50057", "#00b0ff", "#ffab40"]
@@ -121,6 +124,7 @@ def read_props(path):
         "cx": np.array([num(r, "CentroidX", np.nan) for r in rows]),
         "cy": np.array([num(r, "CentroidY", np.nan) for r in rows]),
         "size": np.array([num(r, "Size", 10.0) for r in rows]),
+        "ncomp": np.array([num(r, "NumComponents", 1.0) for r in rows]),
     }
 
 
@@ -274,7 +278,91 @@ def analyse_map(img, props):
             o = np.full(near.size, -1)
             o[good] = idx_ok[near[good]]
             owner[s:s + 20000] = o
-    return bg, wy, wx, owner, (mcx, mcy, mrad)
+        owner = _assign_outline_pieces(white, wy, wx, owner, mcx, mcy, mrad)
+    label = _roi_interiors(white.shape, wy, wx, owner)
+    return bg, wy, wx, owner, (mcx, mcy, mrad), label
+
+
+def _assign_outline_pieces(white, wy, wx, owner, mcx, mcy, mrad):
+    """Outline pixels too far from every centroid stay unassigned pixel by pixel; give
+    each still-unassigned pixel the cell owning most of its connected outline piece (or,
+    for a piece with no owner, the nearest centroid within 2 radii)."""
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return owner
+    lab, n = ndimage.label(white, structure=np.ones((3, 3)))
+    if n == 0:
+        return owner
+    comp = lab[wy, wx]
+    owner = owner.copy()
+    has = owner >= 0
+    # majority owner per piece
+    best = np.full(n + 1, -1)
+    if has.any():
+        pairs = np.unique(np.stack([comp[has], owner[has]]), axis=1, return_counts=True)
+        (pc, po), cnt = pairs
+        order = np.lexsort((cnt, pc))            # per piece, highest count last
+        best[pc[order]] = po[order]
+    # pieces without any owner: nearest centroid
+    ok = np.isfinite(mcx)
+    if ok.any():
+        idx = np.nonzero(ok)[0]
+        cyc = ndimage.mean(wy.astype(float), comp, np.arange(1, n + 1))
+        cxc = ndimage.mean(wx.astype(float), comp, np.arange(1, n + 1))
+        for c in np.nonzero(best[1:] < 0)[0] + 1:
+            d = np.hypot(mcx[idx] - cxc[c - 1], mcy[idx] - cyc[c - 1])
+            j = np.argmin(d)
+            if d[j] <= 2 * mrad[idx[j]]:
+                best[c] = idx[j]
+    owner[~has] = best[comp[~has]]
+    return owner
+
+
+def _fill_holes(mask):
+    try:
+        from scipy import ndimage
+        return ndimage.binary_fill_holes(mask)
+    except ImportError:
+        pass
+    # 4-connected flood fill of the background from the border
+    outside = np.zeros_like(mask)
+    outside[0, :] = ~mask[0, :]
+    outside[-1, :] = ~mask[-1, :]
+    outside[:, 0] |= ~mask[:, 0]
+    outside[:, -1] |= ~mask[:, -1]
+    while True:
+        grow = outside.copy()
+        grow[1:] |= outside[:-1]
+        grow[:-1] |= outside[1:]
+        grow[:, 1:] |= outside[:, :-1]
+        grow[:, :-1] |= outside[:, 1:]
+        grow &= ~mask
+        if (grow == outside).all():
+            return ~outside
+        outside = grow
+
+
+def _roi_interiors(shape, wy, wx, owner):
+    """Map-sized label image: index of the cell whose filled outline covers each pixel
+    (-1 = none). Where ROIs overlap the smaller one wins, so it stays clickable."""
+    label = np.full(shape, -1, dtype=np.int32)
+    cells = np.unique(owner[owner >= 0])
+    fills = []
+    for i in cells:
+        m = owner == i
+        y, x = wy[m], wx[m]
+        y0, x0 = y.min(), x.min()
+        box = np.zeros((y.max() - y0 + 3, x.max() - x0 + 3), bool)
+        box[y - y0 + 1, x - x0 + 1] = True
+        filled = _fill_holes(box)
+        fills.append((int(filled.sum()), int(i), y0 - 1, x0 - 1, filled))
+    for _, i, y0, x0, filled in sorted(fills, key=lambda f: -f[0]):
+        yy, xx = np.nonzero(filled)
+        yy, xx = yy + y0, xx + x0
+        ok = (yy >= 0) & (yy < shape[0]) & (xx >= 0) & (xx < shape[1])
+        label[yy[ok], xx[ok]] = i
+    return label
 
 
 def to_photo(rgb):
@@ -347,12 +435,15 @@ class ResultsViewer(tk.Toplevel):
         ttk.Button(bar, text="Open folder…", command=self.open_folder).pack(side="left")
         ttk.Label(bar, text="Result:").pack(side="left", padx=(10, 2))
         self.set_var = tk.StringVar()
-        self.set_box = ttk.Combobox(bar, textvariable=self.set_var, state="readonly", width=60)
+        self.set_box = ttk.Combobox(bar, textvariable=self.set_var, state="readonly", width=44)
         self.set_box.pack(side="left")
         self.set_box.bind("<<ComboboxSelected>>", lambda e: self.load_set(self.set_box.current()))
         self.hide_rejected = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Hide rejected cells", variable=self.hide_rejected,
-                        command=self._build_rows).pack(side="left", padx=10)
+                        command=self._refresh_cells).pack(side="left", padx=(10, 4))
+        self.reject_dups = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Reject duplicates", variable=self.reject_dups,
+                        command=self._apply_quality).pack(side="left", padx=(0, 10))
         ttk.Button(bar, text="Clear selection", command=self.clear_selection).pack(side="left")
         ttk.Button(bar, text="Save traces…", command=self.save_traces).pack(side="left", padx=(6, 0))
 
@@ -447,9 +538,10 @@ class ResultsViewer(tk.Toplevel):
                 props = read_props(rs["props"])
                 t, names, statuses, data = read_traces(rs["traces"])
                 img = read_tiff(rs["map"])
-                bg, wy, wx, owner, cent = analyse_map(img, props)
+                bg, wy, wx, owner, cent, label = analyse_map(img, props)
                 q.put(("ok", dict(props=props, t=t, tnames=names, data=data,
-                                  bg=bg, wy=wy, wx=wx, owner=owner, cent=cent)))
+                                  bg=bg, wy=wy, wx=wx, owner=owner, cent=cent,
+                                  label=label)))
             except Exception as e:  # noqa: BLE001
                 q.put(("err", f"{type(e).__name__}: {e}"))
 
@@ -488,21 +580,71 @@ class ResultsViewer(tk.Toplevel):
             self.norm[i] = (lo, hi if hi > lo else lo + 1)
         self.selected, self.image_cell = {}, None
         self.zoom, self.view = 1.0, None
+        cols = [self.trace_col[i] for i in self.cells]
+        self.score0, self.snr = (np.full(len(props["names"]), -np.inf),
+                                 np.zeros(len(props["names"])))
+        sc, snr = cell_quality.cell_scores(
+            X[:, cols], [props["status"][i] for i in self.cells],
+            props["size"][self.cells], props["ncomp"][self.cells])
+        self.score0[self.cells], self.snr[self.cells] = sc, snr
+        self._apply_quality(redraw=False)
         t = res["t"]
         self.time_lbl.configure(text=f"time {t[0]:.0f} – {t[-1]:.0f} s")
-        n_acc = sum(s == "accepted" for s in props["status"])
-        n_rej = sum(s == "rejected" for s in props["status"])
-        self.status.configure(text=f"{len(self.cells)} cells ({n_acc} accepted, {n_rej} rejected), "
-                                   f"{len(t)} frames")
+        n_acc = sum(self.eff_status[i] == "accepted" for i in self.cells)
+        n_rej = sum(self.eff_status[i] == "rejected" for i in self.cells)
+        self.status.configure(text=f"{len(self.cells)} cells ({n_acc} accepted, {n_rej} rejected, "
+                                   f"{len(self.dups)} as duplicates), {len(t)} frames")
         self.title(f"Inscopix results viewer – {rs['label']}")
         self._build_rows()
         self.draw_map()
         self.draw_cell_image()
 
     # ------------------------------------------------------------------ traces
+    def _apply_quality(self, redraw=True):
+        """Effective status (duplicates rejected when 'Reject duplicates' is on), the
+        reason for each rejection and the cell order: most likely cell first."""
+        props = self.d["props"]
+        self.eff_status = list(props["status"])
+        self.reason = {i: "software" for i in self.cells if props["status"][i] == "rejected"}
+        self.dups = {}
+        if self.reject_dups.get():
+            cells = self.cells
+            X = self.d["data"][:, [self.trace_col[i] for i in cells]]
+            dup = cell_quality.find_duplicates(
+                props["cx"][cells], props["cy"][cells], props["size"][cells], X,
+                self.score0[cells], [props["status"][i] for i in cells])
+            for j, k in dup.items():
+                i, keep = cells[j], cells[k]
+                self.dups[i] = keep
+                self.eff_status[i] = "rejected"
+                self.reason[i] = f"duplicate of {props['names'][keep]}"
+        self.score = self.score0.copy()
+        for i in self.dups:
+            self.score[i] -= 3.0
+        self.cells.sort(key=lambda i: -self.score[i])           # most likely cell first
+        self.rank = {i: r + 1 for r, i in enumerate(self.cells)}
+        if redraw:
+            self._refresh_cells()
+            n = len(self.dups)
+            self.status.configure(text=f"{n} duplicate ROI{'s' if n != 1 else ''} rejected"
+                                  if self.reject_dups.get() else "Duplicates not rejected")
+
+    def _refresh_cells(self, keep_scroll=False):
+        if not self.rs:
+            return
+        top = self.trace_area.canvas.yview()[0]
+        self._build_rows()
+        if keep_scroll:
+            self.after(40, lambda: self.trace_area.canvas.yview_moveto(top))
+        self.draw_map()
+
+    def _hidden(self, i):
+        """Rejected cells are hidden by 'Hide rejected cells' unless the user selected them."""
+        return (self.hide_rejected.get() and self.eff_status[i] == "rejected"
+                and i not in self.selected)
+
     def _visible_cells(self):
-        st = self.d["props"]["status"]
-        return [i for i in self.cells if not (self.hide_rejected.get() and st[i] == "rejected")]
+        return [i for i in self.cells if not self._hidden(i)]
 
     def _row_height(self):
         h = self.trace_area.canvas.winfo_height()
@@ -528,7 +670,8 @@ class ResultsViewer(tk.Toplevel):
             tk.Checkbutton(fr, variable=iv, bg=BG, activebackground=BG, selectcolor="white",
                            command=lambda i=i, v=iv: self.toggle_image(i, v.get())
                            ).pack(side="left")
-            lab = tk.Label(fr, text=names[i] + (" rej" if st[i] == "rejected" else ""),
+            tag = " dup" if i in self.dups else " rej" if self.eff_status[i] == "rejected" else ""
+            lab = tk.Label(fr, text=names[i] + tag,
                            width=9, anchor="w", bg=BG, fg=self._colour(i),
                            font=("TkFixedFont", 9))
             lab.pack(side="left")
@@ -601,19 +744,25 @@ class ResultsViewer(tk.Toplevel):
                     pos = k / max(len(self.rows), 1)
                     if not top <= pos < bottom - 1 / max(len(self.rows), 1):
                         self.trace_area.canvas.yview_moveto(max(0, (k - 2) / len(self.rows)))
-        self.draw_map()
+        if self.hide_rejected.get() and self.eff_status[i] == "rejected":
+            self._refresh_cells(keep_scroll=True)     # its row appears / disappears
+        else:
+            self.draw_map()
         if self.image_cell == i:
             self.draw_cell_image()
 
     def clear_selection(self):
         for i in list(self.selected):
             self.selected.pop(i)
-        for r in self.rows:
-            r["sel"].set(False)
-            r["label"].configure(fg=YELLOW)
-            if r["line"]:
-                r["canvas"].itemconfigure(r["line"], fill=YELLOW)
-        self.draw_map()
+        if self.hide_rejected.get():
+            self._refresh_cells(keep_scroll=True)
+        else:
+            for r in self.rows:
+                r["sel"].set(False)
+                r["label"].configure(fg=YELLOW)
+                if r["line"]:
+                    r["canvas"].itemconfigure(r["line"], fill=YELLOW)
+            self.draw_map()
         self.draw_cell_image()
 
     def toggle_image(self, i, on):
@@ -666,6 +815,9 @@ class ResultsViewer(tk.Toplevel):
             vis = (u0 > -k) & (u0 < cw) & (v0 > -k) & (v0 < ch)
             if not self.show_unselected.get():   # only the user-selected ROIs
                 vis &= np.isin(owner, list(self.selected))
+            hidden = [i for i in self.cells if self._hidden(i)]
+            if hidden:
+                vis &= ~np.isin(owner, hidden)
             u0, v0, own = u0[vis], v0[vis], owner[vis]
             cols = np.tile(np.array(hex_rgb(YELLOW), np.uint8), (own.size, 1))
             for i, c in self.selected.items():
@@ -737,12 +889,17 @@ class ResultsViewer(tk.Toplevel):
                                    f"{'selected' if i in self.selected else 'deselected'}")
 
     def cell_at(self, u, v):
-        """Cell under canvas position (u, v): the ROI whose outline contains it (nearest
-        centroid within its radius), or whose outline passes within a few screen px."""
+        """Cell under canvas position (u, v): the ROI whose filled outline contains it,
+        else the nearest centroid within its radius, else an outline within a few
+        screen pixels. Cells hidden by 'Hide rejected cells' are not picked."""
         cw, ch, s, x0, y0 = self._map_geom()
         px, py = x0 + u / s, y0 + v / s
         mcx, mcy, mrad = self.d["cent"]
         shown = set(self._visible_cells())
+        lab = self.d["label"]
+        iy, ix = int(np.floor(py)), int(np.floor(px))
+        if 0 <= iy < lab.shape[0] and 0 <= ix < lab.shape[1] and lab[iy, ix] in shown:
+            return int(lab[iy, ix])                   # inside a (filled) ROI
         cand = np.array([i for i in shown if np.isfinite(mcx[i])], dtype=int)
         if cand.size:
             dist = np.hypot(mcx[cand] - px, mcy[cand] - py)
@@ -775,11 +932,13 @@ class ResultsViewer(tk.Toplevel):
         if not path:
             return
         props, X, t = self.d["props"], self.d["data"], self.d["t"]
-        cells = self.cells
+        cells = sorted(self.cells)                     # file order (C00, C01, ...)
         names = [props["names"][i] for i in cells]
-        status = [props["status"][i] for i in cells]
+        status = [self.eff_status[i] for i in cells]
         sel = [1 if i in self.selected else 0 for i in cells]
-        rej = [1 if props["status"][i] == "rejected" else 0 for i in cells]
+        rej = [1 if self.eff_status[i] == "rejected" else 0 for i in cells]
+        reason = [self.reason.get(i, "") for i in cells]
+        rank = [self.rank[i] for i in cells]
         colour = [self.selected.get(i, "") for i in cells]
         M = X[:, [self.trace_col[i] for i in cells]]
         try:
@@ -793,6 +952,9 @@ class ResultsViewer(tk.Toplevel):
                     "softwareRejected": np.array(rej, bool).reshape(1, -1),
                     "userSelected": np.array(sel, bool).reshape(1, -1),
                     "selectionColour": obj(colour),
+                    "rejectReason": obj(reason),
+                    "likelihoodRank": np.array(rank, float).reshape(1, -1),
+                    "likelihoodScore": self.score[cells].reshape(1, -1),
                     "centroidX": props["cx"][cells].reshape(1, -1),
                     "centroidY": props["cy"][cells].reshape(1, -1),
                     "sourceTraces": os.path.basename(self.rs["traces"]),
@@ -803,6 +965,8 @@ class ResultsViewer(tk.Toplevel):
                     w.writerow(["Time (s)"] + names)
                     w.writerow(["Software status"] + status)
                     w.writerow(["Software rejected (1/0)"] + rej)
+                    w.writerow(["Rejection reason"] + reason)
+                    w.writerow(["Likelihood rank (1 = most likely cell)"] + rank)
                     w.writerow(["User selected (1/0)"] + sel)
                     w.writerow(["Selection colour"] + colour)
                     np.savetxt(f, np.column_stack([t, M]), delimiter=",",
