@@ -156,6 +156,13 @@ old PCA-ICA (before traces were the IC time courses) are flagged in red.
   `<name>_celltrace-selection.csv`, does not clash with the `*celltrace.csv`
   the MATLAB scripts look for.
 
+**DF/F baseline floor** (NumPy backend): after the spatial band-pass with
+"subtract global minimum", pixels next to sharp bright edges (e.g. the lens
+border) can get a baseline F0 near 0, and dividing by it amplifies their noise
+so much that PCA-ICA finds only single edge pixels. F0 is therefore kept at or
+above 20% of its median (`DFF_F0_FLOOR_FRAC` in `isxd_numpy.py`); the log
+reports how many pixels this affects.
+
 **Cell likelihood and duplicate ROIs** (`cell_quality.py`)
 
 Each ROI gets a score: log(1 + SNR) of its trace (slow drift removed; SNR =

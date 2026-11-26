@@ -46,6 +46,8 @@ log = logging.getLogger("isx_batch")
 __version__ = "numpy-backend-1.2"
 # Versions that decide what the pipeline recomputes (see StepRecord in isx_batch_process):
 READER_VERSION = "numpy-backend-1.1"   # bump when reading/preprocessing results change: all steps
+DFF_VERSION = "2"                      # bump when dF/F results change: dF/F onwards
+                                       # 2: F0 floor at 20% of the median F0
 PCA_ICA_VERSION = "2"                  # bump when PCA-ICA results change: PCA-ICA onwards
                                        # 2: traces = IC time courses (were image-weighted means)
 
@@ -53,6 +55,7 @@ DTYPES = {0: np.uint16, 1: np.float32, 2: np.uint8}
 TYPE_MOVIE, TYPE_CELLSET, TYPE_IMAGE, TYPE_EVENTS = 0, 1, 4, 5
 STATUS = {0: "accepted", 1: "undecided", 2: "rejected"}
 CHUNK = 500  # frames processed at once
+DFF_F0_FLOOR_FRAC = 0.2  # dF/F: F0 is kept >= this fraction of the median F0
 
 
 # ======================================================================================
@@ -564,12 +567,23 @@ def dff(input_movie_files, output_movie_files, f0_type="mean"):
     project_movie(ins, tmp, stat_type="mean" if f0_type == "mean" else "min")
     f0 = IsxdMovie(tmp).get_frame(0)
     os.remove(tmp)
-    safe = np.where(np.abs(f0) > 1e-6, f0, np.nan)
+    # F0 floor: after the spatial band-pass with "subtract global minimum", pixels in the
+    # dip next to sharp bright edges (e.g. the lens border) have F0 close to 0. Dividing
+    # by it multiplies their noise ~100x, those pixels then dominate PCA-ICA and every
+    # component becomes a single edge pixel. F0 is therefore kept at or above a fraction
+    # of the typical (median) F0.
+    pos = f0[f0 > 0]
+    floor = DFF_F0_FLOOR_FRAC * (np.median(pos) if pos.size else 1.0)
+    n_low = int((f0 < floor).sum())
+    if n_low:
+        log.info("  F0 below %.0f%% of its median in %d pixels (%.1f%%): F0 raised to %.4g there",
+                 100 * DFF_F0_FLOOR_FRAC, n_low, 100 * n_low / f0.size, floor)
+    safe = np.maximum(f0, floor) if floor > 0 else np.where(np.abs(f0) > 1e-6, f0, np.nan)
     for src, dst in zip(ins, outs):
         mov = IsxdMovie(src)
         with IsxdWriter(dst, _derive_header(mov.header)) as w:
             for _, fr in mov.chunks():
-                w.write(np.nan_to_num((fr - safe) / safe))
+                w.write(np.nan_to_num((fr - f0) / safe))
 
 
 def _fastica(X, n_comp, max_iter, tol, seed=0):

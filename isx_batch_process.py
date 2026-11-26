@@ -464,7 +464,8 @@ def process_group(inputs: List[str], out_dir: str, name: str, P: Params,
     src = current
     dff = out_paths(src, out_dir, "DFF")
     if R.step("dff", "dF/F", dff, [last], "dff" in steps,
-              lambda: isx.dff(input_movie_files=src, output_movie_files=dff, f0_type=P.f0_type)):
+              lambda: isx.dff(input_movie_files=src, output_movie_files=dff, f0_type=P.f0_type),
+              extra_params={"impl": getattr(isx, "DFF_VERSION", "")}):
         current, last = dff, "dff"
 
     # 5. Cell identification -> one cell set per input movie (series: one per segment)
