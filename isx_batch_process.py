@@ -395,7 +395,7 @@ def process_group(inputs: List[str], out_dir: str, name: str, P: Params,
     os.makedirs(out_dir, exist_ok=True)
     log.info("=== %s: %d file(s) -> %s", name, len(inputs), out_dir)
     root = {"inputs": [_file_sig(f) for f in inputs], "backend": BACKEND,
-            "backend_version": getattr(isx, "__version__", "")}
+            "backend_version": getattr(isx, "READER_VERSION", getattr(isx, "__version__", ""))}
     R = StepRecord(out_dir, name, P, overwrite, root)
     current, last = inputs, "raw"
 
@@ -497,7 +497,9 @@ def process_group(inputs: List[str], out_dir: str, name: str, P: Params,
         label = "CNMFe"
     else:
         raise ValueError(f"Unknown cell identification method: {P.method}")
-    if not R.step(P.method, label, cellsets, [cell_dep], "cells" in steps, run_cells):
+    impl = {"impl": getattr(isx, "PCA_ICA_VERSION", "")} if P.method == "pca-ica" else None
+    if not R.step(P.method, label, cellsets, [cell_dep], "cells" in steps, run_cells,
+                  extra_params=impl):
         if any(s in steps for s in ("events", "accept", "export")):
             log.warning("No cell sets available; skipping events/accept/export.")
         return

@@ -43,7 +43,11 @@ from scipy import ndimage, signal
 
 log = logging.getLogger("isx_batch")
 
-__version__ = "numpy-backend-1.1"  # bump when results change: forces recomputation
+__version__ = "numpy-backend-1.2"
+# Versions that decide what the pipeline recomputes (see StepRecord in isx_batch_process):
+READER_VERSION = "numpy-backend-1.1"   # bump when reading/preprocessing results change: all steps
+PCA_ICA_VERSION = "2"                  # bump when PCA-ICA results change: PCA-ICA onwards
+                                       # 2: traces = IC time courses (were image-weighted means)
 
 DTYPES = {0: np.uint16, 1: np.float32, 2: np.uint8}
 TYPE_MOVIE, TYPE_CELLSET, TYPE_IMAGE, TYPE_EVENTS = 0, 1, 4, 5
@@ -642,11 +646,20 @@ def pca_ica(input_movie_files, output_cell_set_files, num_pcs, num_ics=120,
     sk = ((images - images.mean(1, keepdims=True)) ** 3).mean(1)
     images *= np.sign(sk)[:, None]
     images /= np.abs(images).max(1, keepdims=True) + 1e-12
-    # traces: image-weighted average of the movie, in the input's units (e.g. dF/F)
-    wts = np.clip(images, 0, None)
-    wts /= wts.sum(1, keepdims=True) + 1e-12
-
-    traces = np.concatenate([m.get_frames().reshape(m.num_times, -1) for m in movs]) @ wts.T
+    # Traces: the IC time courses, i.e. the same unmixing applied to the variance-
+    # normalised temporal PCs (Mukamel et al. 2009, CellSort: ica_sig = W * mixedsig),
+    # as IDPS does. Unlike averaging the movie over the cell image, this keeps signals
+    # shared across the field of view (neuropil, global brightness, which are separate
+    # components) out of the cell traces. Scaled to the input's units (e.g. dF/F): the
+    # trace is fitted to the movie averaged over the cell's footprint (pixels >= 50% of
+    # the image peak), so its amplitude matches the cell's own signal.
+    traces = (A @ sig).T * np.sign(sk)[None, :]                 # T x num_ics
+    foot = (images >= 0.5).astype(M.dtype)
+    foot /= foot.sum(1, keepdims=True) + 1e-12
+    local = M @ foot.T                                           # footprint means, T x num_ics
+    tc = traces - traces.mean(0)
+    gain = (tc * (local - local.mean(0))).sum(0) / ((tc ** 2).sum(0) + 1e-12)
+    traces = tc * np.where(gain > 0, gain, np.abs(gain))[None, :]
 
     order = np.argsort(-traces.std(0))   # most active first
     images, traces = images[order], traces[:, order]
