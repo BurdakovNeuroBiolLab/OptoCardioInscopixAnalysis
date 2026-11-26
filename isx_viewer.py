@@ -193,9 +193,35 @@ def find_cell_image(rs, name):
 # --------------------------------------------------------------------------------------
 # Cell map: outlines and their owners
 # --------------------------------------------------------------------------------------
+def _fill_from_neighbours(img, mask, max_iter=50):
+    """Replace the masked (outline) pixels by the mean of their unmasked neighbours,
+    growing inwards, so hidden outlines leave no trace in the background."""
+    out = img.astype(np.float64).copy()
+    known = ~mask
+    if known.all() or not known.any():
+        return out
+    out[mask] = 0
+    for _ in range(max_iter):
+        todo = ~known
+        if not todo.any():
+            break
+        v = np.pad(out * known, 1)
+        k = np.pad(known.astype(np.float64), 1)
+        vs = sum(v[1 + dy:v.shape[0] - 1 + dy, 1 + dx:v.shape[1] - 1 + dx]
+                 for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+        ks = sum(k[1 + dy:k.shape[0] - 1 + dy, 1 + dx:k.shape[1] - 1 + dx]
+                 for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+        fill = todo & (ks > 0)
+        out[fill] = vs[fill] / ks[fill]
+        known = known | fill
+    out[~known] = np.median(img[~mask])
+    return out
+
+
 def analyse_map(img, props):
-    """Background (H x W float 0-1), outline pixel coordinates (y, x) and the index of
-    the cell each outline pixel belongs to (-1 = none)."""
+    """Background (H x W float 0-1), outline pixel coordinates (y, x), the index of the
+    cell each outline pixel belongs to (-1 = none), and every cell's centroid and radius
+    in map pixels (0-based; NaN when unknown)."""
     img = np.asarray(img)
     maxval = np.iinfo(img.dtype).max if np.issubdtype(img.dtype, np.integer) else 1.0
     f = img.astype(np.float64)
@@ -206,14 +232,21 @@ def analyse_map(img, props):
     else:
         white = f == maxval
         gray = f
-    bg = gray.copy()
-    if white.any() and (~white).any():
-        bg[white] = np.median(gray[~white])
-    lo, hi = np.percentile(bg, [1, 99.8])
+    # Enlarged IDPS maps have a 1-pixel anti-aliasing halo around the white outlines;
+    # hide it with the outline so hidden ROIs leave no trace.
+    halo = white.copy()
+    halo[1:] |= white[:-1]; halo[:-1] |= white[1:]
+    halo[:, 1:] |= white[:, :-1]; halo[:, :-1] |= white[:, 1:]
+    halo[1:, 1:] |= white[:-1, :-1]; halo[:-1, :-1] |= white[1:, 1:]
+    halo[1:, :-1] |= white[:-1, 1:]; halo[:-1, 1:] |= white[1:, :-1]
+    bg = _fill_from_neighbours(gray, halo)
+    lo, hi = np.percentile(bg, [0.5, 99.95])
     bg = np.clip((bg - lo) / max(hi - lo, 1e-12), 0, 1)
 
     wy, wx = np.nonzero(white)
     owner = np.full(wy.size, -1)
+    n = len(props["names"])
+    mcx, mcy, mrad = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     ok = np.isfinite(props["cx"]) & np.isfinite(props["cy"])
     if wy.size and ok.any():
         cx, cy, size = props["cx"][ok], props["cy"][ok], props["size"][ok]
@@ -231,6 +264,8 @@ def analyse_map(img, props):
         scale = fine[np.argmin([score(s) for s in fine])]
         cxI, cyI = (cx + .5) * scale + .5, (cy + .5) * scale + .5
         idx_ok = np.nonzero(ok)[0]
+        mcx[idx_ok], mcy[idx_ok] = cxI - 1, cyI - 1          # 0-based map pixels
+        mrad[idx_ok] = size * scale * CONTOUR_MAX_FRAC
         for s in range(0, wy.size, 20000):          # memory-friendly chunks
             d2 = (cxI[:, None] - X[None, s:s + 20000]) ** 2 + (cyI[:, None] - Y[None, s:s + 20000]) ** 2
             near = d2.argmin(0)
@@ -239,7 +274,7 @@ def analyse_map(img, props):
             o = np.full(near.size, -1)
             o[good] = idx_ok[near[good]]
             owner[s:s + 20000] = o
-    return bg, wy, wx, owner
+    return bg, wy, wx, owner, (mcx, mcy, mrad)
 
 
 def to_photo(rgb):
@@ -298,6 +333,8 @@ class ResultsViewer(tk.Toplevel):
         self.rows = []
         self._photo_map = self._photo_img = None
         self._after = {}
+        self.zoom, self.view = 1.0, None   # map zoom (1 = fit) and view centre (x, y)
+        self._drag = None
 
         self._build()
         if folder:
@@ -317,13 +354,26 @@ class ResultsViewer(tk.Toplevel):
         ttk.Checkbutton(bar, text="Hide rejected cells", variable=self.hide_rejected,
                         command=self._build_rows).pack(side="left", padx=10)
         ttk.Button(bar, text="Clear selection", command=self.clear_selection).pack(side="left")
+        ttk.Button(bar, text="Save traces…", command=self.save_traces).pack(side="left", padx=(6, 0))
+
         self.status = ttk.Label(bar, text="Open a folder with processed results.")
         self.status.pack(side="left", padx=10)
 
         pw = tk.PanedWindow(self, orient="horizontal", background="#333", sashwidth=5)
         pw.pack(fill="both", expand=True)
-        self.map_canvas = tk.Canvas(pw, background=BG, highlightthickness=0)
-        pw.add(self.map_canvas, stretch="always", width=760)
+        left = tk.Frame(pw, background=BG)
+        mbar = ttk.Frame(left, padding=(4, 2))
+        mbar.pack(fill="x")
+        self.show_unselected = tk.BooleanVar(value=True)
+        ttk.Checkbutton(mbar, text="Show unselected ROIs", variable=self.show_unselected,
+                        command=self.draw_map).pack(side="left")
+        ttk.Button(mbar, text="Fit", width=4, command=self.zoom_fit).pack(side="right")
+        ttk.Button(mbar, text="−", width=3, command=lambda: self.zoom_by(1 / 1.5)).pack(side="right")
+        ttk.Button(mbar, text="+", width=3, command=lambda: self.zoom_by(1.5)).pack(side="right")
+        ttk.Label(mbar, text="Zoom:").pack(side="right", padx=(0, 2))
+        self.map_canvas = tk.Canvas(left, background=BG, highlightthickness=0)
+        self.map_canvas.pack(fill="both", expand=True)
+        pw.add(left, stretch="always", width=760)
         right = tk.PanedWindow(pw, orient="vertical", background="#333", sashwidth=5)
         pw.add(right, stretch="always")
 
@@ -346,6 +396,14 @@ class ResultsViewer(tk.Toplevel):
         right.add(bottom, stretch="always")
 
         self.map_canvas.bind("<Configure>", lambda e: self._schedule(self.draw_map))
+        mc = self.map_canvas
+        mc.bind("<ButtonPress-1>", self._map_press)
+        mc.bind("<B1-Motion>", self._map_drag)
+        mc.bind("<ButtonRelease-1>", self._map_release)
+        mc.bind("<MouseWheel>", lambda e: self._map_wheel(e, 1 if e.delta > 0 else -1))
+        mc.bind("<Button-4>", lambda e: self._map_wheel(e, 1))
+        mc.bind("<Button-5>", lambda e: self._map_wheel(e, -1))
+        mc.bind("<Double-Button-3>", lambda e: self.zoom_fit())
         self.img_canvas.bind("<Configure>", lambda e: self._schedule(self.draw_cell_image))
         self.trace_area.canvas.bind("<Configure>", self._on_trace_resize, add="+")
 
@@ -389,9 +447,9 @@ class ResultsViewer(tk.Toplevel):
                 props = read_props(rs["props"])
                 t, names, statuses, data = read_traces(rs["traces"])
                 img = read_tiff(rs["map"])
-                bg, wy, wx, owner = analyse_map(img, props)
+                bg, wy, wx, owner, cent = analyse_map(img, props)
                 q.put(("ok", dict(props=props, t=t, tnames=names, data=data,
-                                  bg=bg, wy=wy, wx=wx, owner=owner)))
+                                  bg=bg, wy=wy, wx=wx, owner=owner, cent=cent)))
             except Exception as e:  # noqa: BLE001
                 q.put(("err", f"{type(e).__name__}: {e}"))
 
@@ -429,6 +487,7 @@ class ResultsViewer(tk.Toplevel):
             lo, hi = (np.percentile(fin, [0.5, 99.5]) if fin.size else (0, 1))
             self.norm[i] = (lo, hi if hi > lo else lo + 1)
         self.selected, self.image_cell = {}, None
+        self.zoom, self.view = 1.0, None
         t = res["t"]
         self.time_lbl.configure(text=f"time {t[0]:.0f} – {t[-1]:.0f} s")
         n_acc = sum(s == "accepted" for s in props["status"])
@@ -530,11 +589,18 @@ class ResultsViewer(tk.Toplevel):
             self.selected[i] = free[0] if free else SELECT_COLOURS[len(self.selected) % len(SELECT_COLOURS)]
         else:
             self.selected.pop(i, None)
-        for r in self.rows:
+        for k, r in enumerate(self.rows):
             if r["cell"] == i:
+                r["sel"].set(on)
                 if r["line"]:
                     r["canvas"].itemconfigure(r["line"], fill=self._colour(i))
                 r["label"].configure(fg=self._colour(i))
+                if on:  # bring the trace into view
+                    self.trace_area.canvas.update_idletasks()
+                    top, bottom = self.trace_area.canvas.yview()
+                    pos = k / max(len(self.rows), 1)
+                    if not top <= pos < bottom - 1 / max(len(self.rows), 1):
+                        self.trace_area.canvas.yview_moveto(max(0, (k - 2) / len(self.rows)))
         self.draw_map()
         if self.image_cell == i:
             self.draw_cell_image()
@@ -558,39 +624,194 @@ class ResultsViewer(tk.Toplevel):
         self.draw_cell_image()
 
     # ------------------------------------------------------------------ drawing
+    # ------------------------------------------------------------------ map view
+    def _map_geom(self):
+        """Canvas size, display scale (canvas px per map px) and top-left map coordinate."""
+        cv = self.map_canvas
+        cw, ch = cv.winfo_width(), cv.winfo_height()
+        H, W = self.d["bg"].shape
+        s = min(cw / W, ch / H) * self.zoom
+        if self.view is None:
+            self.view = [W / 2, H / 2]
+        # the view centre stays on the image, so it can't be panned away
+        hw, hh = cw / (2 * s), ch / (2 * s)
+        vx = min(max(self.view[0], 0), W)
+        vy = min(max(self.view[1], 0), H)
+        self.view = [vx, vy]
+        return cw, ch, s, vx - hw, vy - hh
+
     def draw_map(self):
         if not self.rs:
             return
         cv = self.map_canvas
-        cw, ch = cv.winfo_width(), cv.winfo_height()
-        if cw < 20 or ch < 20:
+        if cv.winfo_width() < 20 or cv.winfo_height() < 20:
             return
         bg = self.d["bg"]
         H, W = bg.shape
-        s = min(cw / W, ch / H)
-        dw, dh = max(1, int(W * s)), max(1, int(H * s))
-        ys = np.minimum((np.arange(dh) / s).astype(int), H - 1)
-        xs = np.minimum((np.arange(dw) / s).astype(int), W - 1)
-        g = (bg[np.ix_(ys, xs)] * 255).astype(np.uint8)
-        rgb = np.repeat(g[:, :, None], 3, axis=2)
+        cw, ch, s, x0, y0 = self._map_geom()
+        xi = np.floor(x0 + (np.arange(cw) + 0.5) / s).astype(int)
+        yi = np.floor(y0 + (np.arange(ch) + 0.5) / s).astype(int)
+        okx, oky = (xi >= 0) & (xi < W), (yi >= 0) & (yi < H)
+        rgb = np.empty((ch, cw, 3), np.uint8)
+        rgb[:] = hex_rgb(BG)
+        g = (bg[np.ix_(np.clip(yi, 0, H - 1), np.clip(xi, 0, W - 1))] * 255).astype(np.uint8)
+        m = oky[:, None] & okx[None, :]
+        rgb[m] = np.repeat(g[:, :, None], 3, axis=2)[m]
+
         wy, wx, owner = self.d["wy"], self.d["wx"], self.d["owner"]
         if wy.size:
-            k = max(1, int(np.ceil(s)))                     # outline thickness when enlarging
-            cols = np.tile(np.array(hex_rgb(YELLOW), np.uint8), (wy.size, 1))
+            u0 = np.floor((wx - x0) * s).astype(int)
+            v0 = np.floor((wy - y0) * s).astype(int)
+            k = max(1, int(np.ceil(s)))                     # outline thickness when enlarged
+            vis = (u0 > -k) & (u0 < cw) & (v0 > -k) & (v0 < ch)
+            if not self.show_unselected.get():   # only the user-selected ROIs
+                vis &= np.isin(owner, list(self.selected))
+            u0, v0, own = u0[vis], v0[vis], owner[vis]
+            cols = np.tile(np.array(hex_rgb(YELLOW), np.uint8), (own.size, 1))
             for i, c in self.selected.items():
-                cols[owner == i] = hex_rgb(c)
-            # draw unselected first, selected on top
-            order = np.argsort(np.isin(owner, list(self.selected)), kind="stable")
+                cols[own == i] = hex_rgb(c)
+            order = np.argsort(np.isin(own, list(self.selected)), kind="stable")  # selected on top
+            u0, v0, cols = u0[order], v0[order], cols[order]
             for dy in range(k):
                 for dx in range(k):
-                    py = np.minimum((wy[order] * s).astype(int) + dy, dh - 1)
-                    px = np.minimum((wx[order] * s).astype(int) + dx, dw - 1)
-                    rgb[py, px] = cols[order]
+                    py, px = v0 + dy, u0 + dx
+                    inb = (py >= 0) & (py < ch) & (px >= 0) & (px < cw)
+                    rgb[py[inb], px[inb]] = cols[inb]
         self._photo_map = to_photo(rgb)
         cv.delete("all")
-        cv.create_image(cw // 2, ch // 2, image=self._photo_map, anchor="center")
+        cv.create_image(0, 0, image=self._photo_map, anchor="nw")
         cv.create_text(8, 8, anchor="nw", fill="#ddd", font=("TkDefaultFont", 9),
-                       text=os.path.basename(self.rs["map"]))
+                       text=f"{os.path.basename(self.rs['map'])}   zoom {self.zoom:.1f}x")
+        cv.create_text(8, ch - 8, anchor="sw", fill="#999", font=("TkDefaultFont", 8),
+                       text="click an ROI to select it · wheel: zoom · drag: pan")
+
+    def zoom_by(self, f, at=None):
+        """Zoom by factor f, keeping the map point under canvas position `at` fixed."""
+        if not self.rs:
+            return
+        cw, ch, s, x0, y0 = self._map_geom()
+        u, v = at if at else (cw / 2, ch / 2)
+        px, py = x0 + u / s, y0 + v / s                       # map point under the cursor
+        self.zoom = float(min(max(self.zoom * f, 1.0), 40.0))
+        if self.zoom <= 1.0001:            # back at full view: re-centre
+            self.zoom, self.view = 1.0, None
+            self.draw_map()
+            return
+        H, W = self.d["bg"].shape
+        s2 = min(cw / W, ch / H) * self.zoom                  # new display scale
+        self.view = [px - u / s2 + cw / (2 * s2), py - v / s2 + ch / (2 * s2)]
+        self.draw_map()
+
+    def zoom_fit(self):
+        self.zoom, self.view = 1.0, None
+        self.draw_map()
+
+    def _map_wheel(self, e, direction):
+        self.zoom_by(1.25 if direction > 0 else 1 / 1.25, at=(e.x, e.y))
+
+    def _map_press(self, e):
+        self._drag = {"x": e.x, "y": e.y, "moved": False,
+                      "view": list(self.view) if self.view else None}
+
+    def _map_drag(self, e):
+        if not self.rs or not self._drag or self._drag["view"] is None:
+            return
+        dx, dy = e.x - self._drag["x"], e.y - self._drag["y"]
+        if abs(dx) + abs(dy) > 3:
+            self._drag["moved"] = True
+        if self._drag["moved"]:
+            s = self._map_geom()[2]
+            self.view = [self._drag["view"][0] - dx / s, self._drag["view"][1] - dy / s]
+            self._schedule(self.draw_map, 15)
+
+    def _map_release(self, e):
+        d, self._drag = self._drag, None
+        if not self.rs or (d and d["moved"]):
+            return
+        i = self.cell_at(e.x, e.y)
+        if i is None:
+            self.status.configure(text="No ROI at that point")
+            return
+        self.toggle_select(i, i not in self.selected)
+        self.status.configure(text=f"{self.d['props']['names'][i]} "
+                                   f"{'selected' if i in self.selected else 'deselected'}")
+
+    def cell_at(self, u, v):
+        """Cell under canvas position (u, v): the ROI whose outline contains it (nearest
+        centroid within its radius), or whose outline passes within a few screen px."""
+        cw, ch, s, x0, y0 = self._map_geom()
+        px, py = x0 + u / s, y0 + v / s
+        mcx, mcy, mrad = self.d["cent"]
+        shown = set(self._visible_cells())
+        cand = np.array([i for i in shown if np.isfinite(mcx[i])], dtype=int)
+        if cand.size:
+            dist = np.hypot(mcx[cand] - px, mcy[cand] - py)
+            inside = dist <= mrad[cand]
+            if inside.any():
+                return int(cand[inside][np.argmin(dist[inside])])
+        wy, wx, owner = self.d["wy"], self.d["wx"], self.d["owner"]
+        mine = np.isin(owner, list(shown))
+        if mine.any():
+            d = np.hypot(wx[mine] - px, wy[mine] - py)
+            j = np.argmin(d)
+            if d[j] * s <= 6:
+                return int(owner[mine][j])
+        return None
+
+    # ------------------------------------------------------------------ saving
+    def save_traces(self):
+        """Trace matrix with the cell flags: CSV (extra header rows) or MATLAB .mat."""
+        if not self.rs:
+            return
+        try:
+            import scipy.io as sio
+        except ImportError:
+            sio = None
+        types = [("CSV", "*.csv")] + ([("MATLAB", "*.mat")] if sio else [])
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save traces with selection", initialdir=self.rs["dir"],
+            initialfile=f"{self.rs['base']}celltrace-selection.csv",
+            defaultextension=".csv", filetypes=types)
+        if not path:
+            return
+        props, X, t = self.d["props"], self.d["data"], self.d["t"]
+        cells = self.cells
+        names = [props["names"][i] for i in cells]
+        status = [props["status"][i] for i in cells]
+        sel = [1 if i in self.selected else 0 for i in cells]
+        rej = [1 if props["status"][i] == "rejected" else 0 for i in cells]
+        colour = [self.selected.get(i, "") for i in cells]
+        M = X[:, [self.trace_col[i] for i in cells]]
+        try:
+            if path.lower().endswith(".mat"):
+                if sio is None:
+                    raise RuntimeError("Saving .mat files needs SciPy")
+                obj = lambda v: np.array(v, dtype=object).reshape(1, -1)  # noqa: E731
+                sio.savemat(path, {
+                    "t": t.reshape(-1, 1), "traces": M,
+                    "cellNames": obj(names), "softwareStatus": obj(status),
+                    "softwareRejected": np.array(rej, bool).reshape(1, -1),
+                    "userSelected": np.array(sel, bool).reshape(1, -1),
+                    "selectionColour": obj(colour),
+                    "centroidX": props["cx"][cells].reshape(1, -1),
+                    "centroidY": props["cy"][cells].reshape(1, -1),
+                    "sourceTraces": os.path.basename(self.rs["traces"]),
+                }, do_compression=True)
+            else:
+                with open(path, "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["Time (s)"] + names)
+                    w.writerow(["Software status"] + status)
+                    w.writerow(["Software rejected (1/0)"] + rej)
+                    w.writerow(["User selected (1/0)"] + sel)
+                    w.writerow(["Selection colour"] + colour)
+                    np.savetxt(f, np.column_stack([t, M]), delimiter=",",
+                               fmt=["%.6f"] + ["%.7g"] * M.shape[1])
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Could not save", str(e), parent=self)
+            return
+        self.status.configure(text=f"Saved {len(cells)} cells ({sum(sel)} selected, "
+                                   f"{sum(rej)} rejected) to {os.path.basename(path)}")
 
     def draw_cell_image(self):
         cv = self.img_canvas

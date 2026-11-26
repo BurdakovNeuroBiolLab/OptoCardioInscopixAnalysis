@@ -129,11 +129,25 @@ every ticked step.
 
 "View results…" in the GUI (or `python isx_viewer.py <folder>`) opens every
 `*_celltrace.csv` found in the folder and its subfolders, with its props and
-cell map; IDPS exports work too. Left: the cell map with all ROI outlines in
-yellow. Right, bottom: the traces, 10 at a time (scroll for more), each with two
-check boxes. The left box selects the cell: its trace and outline get their own
-colour (several cells at once). The right box shows that cell's image above
-(one at a time), or "Cell Images Not Found" if no per-cell TIFFs were saved.
+cell map; IDPS exports work too.
+
+- Left: the cell map with all ROI outlines in yellow. Click an ROI to select or
+  deselect it; mouse wheel zooms around the cursor, dragging pans, and
+  +/−/Fit above the map do the same. "Show unselected ROIs" off leaves only
+  the selected outlines.
+- Right, bottom: the traces, 10 at a time (scroll for more), each with two
+  check boxes. The left box selects the cell: its trace and outline get their
+  own colour (several cells at once). The right box shows that cell's image
+  above (one at a time), or "Cell Images Not Found" if no per-cell TIFFs were
+  saved.
+- "Save traces…" writes the trace matrix of all cells with the selection:
+  CSV (header rows: cell names, software status, software rejected 1/0, user
+  selected 1/0, selection colour; then time + one column per cell) or, with
+  SciPy installed, a MATLAB `.mat` file (`t`, `traces`, `cellNames`,
+  `softwareStatus`, `softwareRejected`, `userSelected`, `selectionColour`,
+  `centroidX`, `centroidY`). The default name,
+  `<name>_celltrace-selection.csv`, does not clash with the `*celltrace.csv`
+  the MATLAB scripts look for.
 
 **Command line**
 
