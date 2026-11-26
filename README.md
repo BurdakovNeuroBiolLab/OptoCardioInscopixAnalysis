@@ -130,7 +130,9 @@ every ticked step.
 
 "View results…" in the GUI (or `python isx_viewer.py <folder>`) opens every
 `*_celltrace.csv` found in the folder and its subfolders, with its props and
-cell map; IDPS exports work too.
+cell map; IDPS exports work too. The "Result" menu lists them newest first and
+opens the most recently processed one; results made with the NumPy backend's
+old PCA-ICA (before traces were the IC time courses) are flagged in red.
 
 - Left: the cell map with all ROI outlines in yellow. Click anywhere inside an
   ROI to select or deselect it; mouse wheel zooms around the cursor, dragging pans, and

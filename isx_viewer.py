@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -168,14 +169,37 @@ def find_result_sets(folder):
             if cmap is None:  # a single cell map in the folder will do
                 maps = [v for k, v in lower.items() if re.search(r"cellmap\.tiff?$", k)]
                 cmap = maps[0] if len(maps) == 1 else None
+            tpath = os.path.join(root, f)
+            mtime = os.path.getmtime(tpath)
             sets.append({
-                "label": os.path.relpath(os.path.join(root, f), folder),
-                "dir": root, "base": base, "traces": os.path.join(root, f),
+                "label": f"{os.path.relpath(tpath, folder)}   "
+                         f"({time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))})",
+                "dir": root, "base": base, "traces": tpath, "mtime": mtime,
                 "props": os.path.join(root, props) if props else None,
                 "map": os.path.join(root, cmap) if cmap else None,
                 "files": lower,
+                "outdated": _outdated_pca_ica(os.path.join(root, base + "steps.json")),
             })
+    sets.sort(key=lambda r: -r["mtime"])           # most recently processed first
     return sets
+
+
+def _outdated_pca_ica(steps_json):
+    """True when the result's cell set was made by this project's NumPy PCA-ICA before
+    the current implementation (older versions gave traces that all look alike),
+    according to <name>_steps.json and the cell set's own header."""
+    try:
+        import json
+        from isxd_numpy import PCA_ICA_VERSION, read_header
+        with open(steps_json) as f:
+            rec = json.load(f).get("pca-ica")
+        if not rec:
+            return False
+        cellset = os.path.join(os.path.dirname(steps_json), rec["outputs"][0])
+        producer = read_header(cellset)[0].get("producer", {}).get("name", "")
+        return producer == "isxd_numpy" and rec.get("params", {}).get("impl") != PCA_ICA_VERSION
+    except Exception:  # noqa: BLE001 - no record, Inscopix cell set, unreadable: no warning
+        return False
 
 
 def find_cell_image(rs, name):
@@ -516,7 +540,7 @@ class ResultsViewer(tk.Toplevel):
                                 parent=self)
             return
         self.set_box.configure(values=[s["label"] for s in self.sets])
-        self.set_box.current(0)
+        self.set_box.current(0)               # the most recently processed result
         self.load_set(0)
 
     def load_set(self, i):
@@ -595,6 +619,11 @@ class ResultsViewer(tk.Toplevel):
         self.status.configure(text=f"{len(self.cells)} cells ({n_acc} accepted, {n_rej} rejected, "
                                    f"{len(self.dups)} as duplicates), {len(t)} frames")
         self.title(f"Inscopix results viewer – {rs['label']}")
+        if rs.get("outdated"):
+            self.status.configure(text="Made with the old PCA-ICA (traces too alike): run this "
+                                       "recording again to update it", foreground="red")
+        else:
+            self.status.configure(foreground="")
         self._build_rows()
         self.draw_map()
         self.draw_cell_image()
